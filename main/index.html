@@ -52,6 +52,31 @@ button.active { background: #27ae60; }
 </div>
 
 <div class="card">
+  <h2>Settings</h2>
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input type="checkbox" id="chk-ulaw" onchange="toggleUlaw(this.checked)">
+    <span>µ-law compression (2:1, smaller files)</span>
+  </label>
+  <hr style="border-color:#0a0a1a;margin:10px 0">
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input type="checkbox" id="chk-filter" onchange="toggleFilter(this.checked)">
+    <span>Enable audio filter</span>
+  </label>
+  <div id="filter-controls" style="display:none;margin-top:8px">
+    <div class="slider-row">
+      <span>Cut low:</span>
+      <input type="range" id="filter-hp" min="50" max="2000" step="10" value="200" oninput="updateFilter()">
+      <span id="filter-hp-val">Off</span>
+    </div>
+    <div class="slider-row">
+      <span>Cut high:</span>
+      <input type="range" id="filter-lp" min="2000" max="9500" step="100" value="6000" oninput="updateFilter()">
+      <span id="filter-lp-val">Off</span>
+    </div>
+  </div>
+</div>
+
+<div class="card">
   <h2>Auto-Record</h2>
   <button id="btn-auto" onclick="toggleAuto()">Enable Auto-Record</button>
   <div class="slider-row">
@@ -64,6 +89,7 @@ button.active { background: #27ae60; }
     <div class="rms-threshold" id="rms-threshold" style="left:20%"></div>
   </div>
   <div class="status" id="auto-status">Disabled</div>
+  <div class="status" id="zcr-status"></div>
 </div>
 
 <div class="card">
@@ -82,6 +108,7 @@ let recording = false;
 let autoMode = false;
 let nextPlayTime = 0;
 let thresholdTimer = null;
+let filterTimer = null;
 
 function toggleListen() {
   if (!listening) startListen();
@@ -176,6 +203,40 @@ function toggleAuto() {
     body: JSON.stringify({ enabled: newMode })
   }).then(() => {
     setTimeout(loadStatus, 300);
+  });
+}
+
+function toggleUlaw(checked) {
+  fetch('/api/codec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ulaw: checked })
+  });
+}
+
+function toggleFilter(enabled) {
+  document.getElementById('filter-controls').style.display = enabled ? 'block' : 'none';
+  if (enabled) {
+    updateFilter();
+  } else {
+    sendFilter(0, 0);
+  }
+}
+
+function updateFilter() {
+  const hp = parseInt(document.getElementById('filter-hp').value);
+  const lp = parseInt(document.getElementById('filter-lp').value);
+  document.getElementById('filter-hp-val').textContent = hp + ' Hz';
+  document.getElementById('filter-lp-val').textContent = lp + ' Hz';
+  if (filterTimer) clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => sendFilter(hp, lp), 300);
+}
+
+function sendFilter(hp, lp) {
+  fetch('/api/filter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hp: hp, lp: lp })
   });
 }
 
@@ -275,6 +336,37 @@ function loadStatus() {
     if (s.current_rms !== undefined) {
       const rmsPct = Math.min(100, (s.current_rms / 10000) * 100);
       document.getElementById('rms-bar').style.width = rmsPct + '%';
+    }
+
+    // Update µ-law checkbox
+    if (s.ulaw !== undefined) {
+      document.getElementById('chk-ulaw').checked = s.ulaw;
+    }
+
+    // Update ZCR display
+    if (s.current_zcr !== undefined) {
+      document.getElementById('zcr-status').textContent = 'ZCR: ' + s.current_zcr.toFixed(2);
+    }
+
+    // Update filter state
+    if (s.filter_hp !== undefined || s.filter_lp !== undefined) {
+      const hp = s.filter_hp || 0;
+      const lp = s.filter_lp || 0;
+      const active = hp > 0 || lp > 0;
+      document.getElementById('chk-filter').checked = active;
+      document.getElementById('filter-controls').style.display = active ? 'block' : 'none';
+      if (hp > 0) {
+        document.getElementById('filter-hp').value = hp;
+        document.getElementById('filter-hp-val').textContent = hp + ' Hz';
+      } else {
+        document.getElementById('filter-hp-val').textContent = 'Off';
+      }
+      if (lp > 0) {
+        document.getElementById('filter-lp').value = lp;
+        document.getElementById('filter-lp-val').textContent = lp + ' Hz';
+      } else {
+        document.getElementById('filter-lp-val').textContent = 'Off';
+      }
     }
   }).catch(() => {});
 }

@@ -36,7 +36,7 @@ static volatile bool s_recording = false;
 static volatile bool s_rec_request_start = false;
 static volatile bool s_rec_request_stop = false;
 static FILE *s_wav_file = NULL;
-static char s_rec_filename[64];
+static char s_rec_filename[96];
 static char s_rec_start_time[80];
 static rec_source_t s_rec_source = REC_SOURCE_NONE;
 
@@ -47,10 +47,24 @@ static int               s_auto_state = AUTO_IDLE;
 static uint32_t          s_silence_chunks = 0;
 static volatile uint16_t s_current_rms = 0;
 
+// µ-law compression toggle
+static volatile bool s_use_ulaw = false;
+
+// File splitting state
+static uint32_t s_samples_written = 0;
+static int s_file_part = 1;
+static char s_rec_basename[48];  // base name without .wav extension
+#define MAX_FILE_SAMPLES (5 * 60 * AUDIO_SAMPLE_RATE)  // 6,000,000
+
 // Smoothed RMS and adaptive noise floor
 static float s_rms_smooth = 0;          // fast EMA of per-chunk RMS
 static float s_noise_floor = 0;         // slow EMA tracking ambient level
 static uint32_t s_loud_streak = 0;      // consecutive loud chunks
+
+// Zero-crossing rate for auto-record
+static float s_zcr_smooth = 0;          // smoothed ZCR
+static volatile float s_current_zcr = 0;  // exposed to status API
+#define ZCR_SMOOTH_ALPHA 0.3f
 
 // EMA coefficients (alpha): higher = more responsive
 #define RMS_SMOOTH_ALPHA    0.3f   // ~3 chunks to settle
@@ -129,17 +143,19 @@ static void generate_rec_filename(void)
     localtime_r(&now, &ti);
 
     if (ti.tm_year + 1900 >= 2024) {
-        snprintf(s_rec_filename, sizeof(s_rec_filename),
-                 "%04d-%02d-%02d_%02d-%02d-%02d.wav",
+        snprintf(s_rec_basename, sizeof(s_rec_basename),
+                 "%04d-%02d-%02d_%02d-%02d-%02d",
                  ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
                  ti.tm_hour, ti.tm_min, ti.tm_sec);
+        snprintf(s_rec_filename, sizeof(s_rec_filename), "%s.wav", s_rec_basename);
         snprintf(s_rec_start_time, sizeof(s_rec_start_time),
                  "%04d-%02d-%02d %02d:%02d:%02d",
                  ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
                  ti.tm_hour, ti.tm_min, ti.tm_sec);
     } else {
         int num = next_rec_number();
-        snprintf(s_rec_filename, sizeof(s_rec_filename), "rec_%03d.wav", num);
+        snprintf(s_rec_basename, sizeof(s_rec_basename), "rec_%03d", num);
+        snprintf(s_rec_filename, sizeof(s_rec_filename), "%s.wav", s_rec_basename);
         s_rec_start_time[0] = '\0';
     }
 }
@@ -168,11 +184,21 @@ static void pre_buf_flush_to_wav(void)
 
     // Flush in one or two segments (ring buffer wrap)
     if (start + s_pre_buf_count <= PRE_BUF_SAMPLES) {
-        wav_write(s_wav_file, &s_pre_buf[start], s_pre_buf_count);
+        if (s_use_ulaw)
+            wav_write_ulaw(s_wav_file, &s_pre_buf[start], s_pre_buf_count);
+        else
+            wav_write(s_wav_file, &s_pre_buf[start], s_pre_buf_count);
+        s_samples_written += s_pre_buf_count;
     } else {
         size_t first = PRE_BUF_SAMPLES - start;
-        wav_write(s_wav_file, &s_pre_buf[start], first);
-        wav_write(s_wav_file, &s_pre_buf[0], s_pre_buf_count - first);
+        if (s_use_ulaw) {
+            wav_write_ulaw(s_wav_file, &s_pre_buf[start], first);
+            wav_write_ulaw(s_wav_file, &s_pre_buf[0], s_pre_buf_count - first);
+        } else {
+            wav_write(s_wav_file, &s_pre_buf[start], first);
+            wav_write(s_wav_file, &s_pre_buf[0], s_pre_buf_count - first);
+        }
+        s_samples_written += s_pre_buf_count;
     }
 
     s_pre_buf_head = 0;
@@ -186,6 +212,9 @@ const char *main_rec_start_time(void) { return s_rec_start_time; }
 uint16_t main_current_rms(void) { return s_current_rms; }
 bool main_auto_mode(void) { return s_auto_mode; }
 uint16_t main_auto_threshold(void) { return s_auto_threshold; }
+bool main_use_ulaw(void) { return s_use_ulaw; }
+void main_set_use_ulaw(bool v) { s_use_ulaw = v; }
+float main_current_zcr(void) { return s_current_zcr; }
 
 const char *main_rec_source_str(void)
 {
@@ -202,6 +231,7 @@ void main_set_auto_mode(bool enabled)
         // Reset adaptive state on fresh enable
         s_noise_floor = 0;
         s_rms_smooth = 0;
+        s_zcr_smooth = 0;
         s_loud_streak = 0;
         s_auto_state = AUTO_IDLE;
         s_silence_chunks = 0;
@@ -215,12 +245,32 @@ void main_set_auto_threshold(uint16_t thr)
     s_auto_threshold = thr;
 }
 
-// --- Flush write buffer to SD ---
+// --- Flush write buffer to SD (with file splitting) ---
 static void flush_write_buf(void)
 {
     if (s_write_buf_pos > 0 && s_wav_file) {
-        wav_write(s_wav_file, s_write_buf, s_write_buf_pos);
+        if (s_use_ulaw)
+            wav_write_ulaw(s_wav_file, s_write_buf, s_write_buf_pos);
+        else
+            wav_write(s_wav_file, s_write_buf, s_write_buf_pos);
+        s_samples_written += s_write_buf_pos;
         s_write_buf_pos = 0;
+
+        // File splitting at MAX_FILE_SAMPLES
+        if (s_samples_written >= MAX_FILE_SAMPLES) {
+            wav_close(s_wav_file);
+            s_file_part++;
+            snprintf(s_rec_filename, sizeof(s_rec_filename),
+                     "%s_p%d.wav", s_rec_basename, s_file_part);
+            char path[128];
+            snprintf(path, sizeof(path), "%s/%s", SD_MOUNT_POINT, s_rec_filename);
+            if (s_use_ulaw)
+                s_wav_file = wav_open_ulaw(path, AUDIO_SAMPLE_RATE, 1);
+            else
+                s_wav_file = wav_open(path, AUDIO_SAMPLE_RATE, 16, 1);
+            s_samples_written = 0;
+            ESP_LOGI(TAG, "File split: now recording %s", s_rec_filename);
+        }
     }
 }
 
@@ -237,12 +287,17 @@ static bool start_recording(rec_source_t source)
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", SD_MOUNT_POINT, s_rec_filename);
 
-    s_wav_file = wav_open(path, AUDIO_SAMPLE_RATE, 16, 1);
+    if (s_use_ulaw)
+        s_wav_file = wav_open_ulaw(path, AUDIO_SAMPLE_RATE, 1);
+    else
+        s_wav_file = wav_open(path, AUDIO_SAMPLE_RATE, 16, 1);
     if (!s_wav_file) return false;
 
     s_recording = true;
     s_rec_source = source;
     s_write_buf_pos = 0;
+    s_samples_written = 0;
+    s_file_part = 1;
     ESP_LOGI(TAG, "Recording started (%s): %s",
              source == REC_SOURCE_AUTO ? "auto" : "manual", s_rec_filename);
     return true;
@@ -309,13 +364,17 @@ static void audio_pipeline_task(void *arg)
             esp_err_t ret = audio_read(pcm_buf, &num_samples);
             if (ret != ESP_OK || num_samples == 0) break;
 
-            // 1. Compute RMS (before mutex)
+            // 1. Compute RMS and ZCR (before mutex)
             float sum_sq = 0;
+            int zc = 0;
             for (size_t i = 0; i < num_samples; i++) {
                 float s = (float)pcm_buf[i];
                 sum_sq += s * s;
+                if (i > 0 && ((pcm_buf[i] > 0) != (pcm_buf[i-1] > 0))) zc++;
             }
             s_current_rms = (uint16_t)sqrtf(sum_sq / num_samples);
+            float zcr = (num_samples > 1) ? (float)zc / (num_samples - 1) : 0;
+            s_current_zcr = zcr;
 
             // 2. Broadcast to WebSocket (before mutex)
             webserver_broadcast_audio(pcm_buf, num_samples);
@@ -351,6 +410,8 @@ static void audio_pipeline_task(void *arg)
 
                 // Update smoothed RMS (fast EMA)
                 s_rms_smooth += RMS_SMOOTH_ALPHA * (rms - s_rms_smooth);
+                // Update smoothed ZCR
+                s_zcr_smooth += ZCR_SMOOTH_ALPHA * (s_current_zcr - s_zcr_smooth);
 
                 // Trigger threshold = max(user threshold, noise_floor * multiplier)
                 float trig_level = (float)s_auto_threshold;
@@ -360,7 +421,8 @@ static void audio_pipeline_task(void *arg)
                 // Silence threshold with hysteresis (lower than trigger)
                 float silence_level = trig_level * SILENCE_FRAC;
 
-                bool loud = (s_rms_smooth >= trig_level);
+                // Combined trigger: high energy AND low ZCR (not white noise)
+                bool loud = (s_rms_smooth >= trig_level) && (s_zcr_smooth < 0.40f);
                 bool quiet = (s_rms_smooth < silence_level);
 
                 switch (s_auto_state) {
@@ -379,8 +441,8 @@ static void audio_pipeline_task(void *arg)
 
                     // Require sustained loud signal to trigger
                     if (s_loud_streak >= TRIGGER_STREAK) {
-                        ESP_LOGI(TAG, "Auto-trigger: rms_smooth=%.0f noise=%.0f trig=%.0f",
-                                 s_rms_smooth, s_noise_floor, trig_level);
+                        ESP_LOGI(TAG, "Auto-trigger: rms=%.0f noise=%.0f trig=%.0f zcr=%.2f",
+                                 s_rms_smooth, s_noise_floor, trig_level, s_zcr_smooth);
                         if (start_recording(REC_SOURCE_AUTO)) {
                             pre_buf_flush_to_wav();
                             s_auto_state = AUTO_RECORDING;
@@ -415,6 +477,7 @@ static void audio_pipeline_task(void *arg)
                 s_loud_streak = 0;
                 s_noise_floor = 0;
                 s_rms_smooth = 0;
+                s_zcr_smooth = 0;
             }
 
             // 6. Buffer audio to SD if recording (any source)
@@ -482,8 +545,8 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting web server...");
     ESP_ERROR_CHECK(webserver_start(on_ws_command));
 
-    // Launch audio pipeline on core 1 (stack 6144 for RMS + pre-buffer)
-    xTaskCreatePinnedToCore(audio_pipeline_task, "audio_pipe", 6144, NULL, 5, NULL, 1);
+    // Launch audio pipeline on core 1
+    xTaskCreatePinnedToCore(audio_pipeline_task, "audio_pipe", 8192, NULL, 5, NULL, 1);
 
     ESP_LOGI(TAG, "System ready!");
 }

@@ -1,5 +1,6 @@
 #include "webserver.h"
 #include "sdcard.h"
+#include "audio.h"
 
 #include <string.h>
 #include <unistd.h>
@@ -268,6 +269,87 @@ static esp_err_t api_auto_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_codec_handler(httpd_req_t *req)
+{
+    extern bool main_use_ulaw(void);
+    extern void main_set_use_ulaw(bool v);
+
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *ulaw = cJSON_GetObjectItem(json, "ulaw");
+    if (ulaw && cJSON_IsBool(ulaw)) {
+        main_set_use_ulaw(cJSON_IsTrue(ulaw));
+    }
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ulaw", main_use_ulaw());
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ESP_OK;
+}
+
+static esp_err_t api_filter_handler(httpd_req_t *req)
+{
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    uint16_t hp = audio_get_hp_freq();
+    uint16_t lp = audio_get_lp_freq();
+
+    cJSON *jhp = cJSON_GetObjectItem(json, "hp");
+    if (jhp && cJSON_IsNumber(jhp)) {
+        int v = jhp->valueint;
+        if (v == 0 || (v >= 50 && v <= 2000)) hp = (uint16_t)v;
+    }
+    cJSON *jlp = cJSON_GetObjectItem(json, "lp");
+    if (jlp && cJSON_IsNumber(jlp)) {
+        int v = jlp->valueint;
+        if (v == 0 || (v >= 2000 && v <= 9500)) lp = (uint16_t)v;
+    }
+    cJSON_Delete(json);
+
+    audio_set_filter(hp, lp);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp, "filter_hp", audio_get_hp_freq());
+    cJSON_AddNumberToObject(resp, "filter_lp", audio_get_lp_freq());
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ESP_OK;
+}
+
 static esp_err_t api_rec_handler(httpd_req_t *req)
 {
     if (s_cmd_cb) {
@@ -305,6 +387,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     extern uint16_t main_current_rms(void);
     extern bool main_auto_mode(void);
     extern uint16_t main_auto_threshold(void);
+    extern bool main_use_ulaw(void);
+    extern float main_current_zcr(void);
 
     bool rec = main_is_recording();
     cJSON_AddBoolToObject(obj, "recording", rec);
@@ -325,6 +409,12 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(obj, "auto_mode", main_auto_mode());
     cJSON_AddNumberToObject(obj, "auto_threshold", main_auto_threshold());
     cJSON_AddNumberToObject(obj, "current_rms", main_current_rms());
+    cJSON_AddBoolToObject(obj, "ulaw", main_use_ulaw());
+    cJSON_AddNumberToObject(obj, "current_zcr", (double)main_current_zcr());
+
+    // Filter state
+    cJSON_AddNumberToObject(obj, "filter_hp", audio_get_hp_freq());
+    cJSON_AddNumberToObject(obj, "filter_lp", audio_get_lp_freq());
 
     char *json_str = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
@@ -345,7 +435,7 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.close_fn = ws_close_callback;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 16;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -368,6 +458,20 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
         .handler = api_auto_handler,
     };
     httpd_register_uri_handler(s_server, &uri_auto);
+
+    httpd_uri_t uri_codec = {
+        .uri = "/api/codec",
+        .method = HTTP_POST,
+        .handler = api_codec_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_codec);
+
+    httpd_uri_t uri_filter = {
+        .uri = "/api/filter",
+        .method = HTTP_POST,
+        .handler = api_filter_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_filter);
 
     httpd_uri_t uri_rec = {
         .uri = "/api/rec/*",

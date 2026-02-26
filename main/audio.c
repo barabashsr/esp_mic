@@ -1,6 +1,7 @@
 #include "audio.h"
 
 #include <string.h>
+#include <math.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +10,81 @@
 static const char *TAG = "audio";
 static adc_continuous_handle_t s_adc_handle = NULL;
 static TaskHandle_t s_notify_task = NULL;
+
+// --- Configurable biquad filters ---
+
+typedef struct {
+    float b0, b1, b2, a1, a2;  // coefficients
+    float z1, z2;                // state (direct form II transposed)
+    bool enabled;
+} biquad_t;
+
+static biquad_t s_hp = {0};  // high-pass
+static biquad_t s_lp = {0};  // low-pass
+static uint16_t s_hp_freq = 0;  // 0 = disabled
+static uint16_t s_lp_freq = 0;  // 0 = disabled
+
+static void biquad_compute_lp(biquad_t *f, float fc, float fs)
+{
+    float w0 = 2.0f * M_PI * fc / fs;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha = sinw0 / (2.0f * 0.7071068f);  // Q = 1/sqrt(2)
+    float a0 = 1.0f + alpha;
+    f->b0 = (1.0f - cosw0) / 2.0f / a0;
+    f->b1 = (1.0f - cosw0) / a0;
+    f->b2 = f->b0;
+    f->a1 = -2.0f * cosw0 / a0;
+    f->a2 = (1.0f - alpha) / a0;
+    f->z1 = 0; f->z2 = 0;
+    f->enabled = true;
+}
+
+static void biquad_compute_hp(biquad_t *f, float fc, float fs)
+{
+    float w0 = 2.0f * M_PI * fc / fs;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha = sinw0 / (2.0f * 0.7071068f);  // Q = 1/sqrt(2)
+    float a0 = 1.0f + alpha;
+    f->b0 = (1.0f + cosw0) / 2.0f / a0;
+    f->b1 = -(1.0f + cosw0) / a0;
+    f->b2 = f->b0;
+    f->a1 = -2.0f * cosw0 / a0;
+    f->a2 = (1.0f - alpha) / a0;
+    f->z1 = 0; f->z2 = 0;
+    f->enabled = true;
+}
+
+static inline float biquad_process(biquad_t *f, float x)
+{
+    float y = f->b0 * x + f->z1;
+    f->z1 = f->b1 * x - f->a1 * y + f->z2;
+    f->z2 = f->b2 * x - f->a2 * y;
+    return y;
+}
+
+void audio_set_filter(uint16_t hp_freq, uint16_t lp_freq)
+{
+    s_hp_freq = hp_freq;
+    s_lp_freq = lp_freq;
+    if (hp_freq > 0) {
+        biquad_compute_hp(&s_hp, (float)hp_freq, (float)AUDIO_SAMPLE_RATE);
+    } else {
+        s_hp.enabled = false;
+        s_hp.z1 = 0; s_hp.z2 = 0;
+    }
+    if (lp_freq > 0) {
+        biquad_compute_lp(&s_lp, (float)lp_freq, (float)AUDIO_SAMPLE_RATE);
+    } else {
+        s_lp.enabled = false;
+        s_lp.z1 = 0; s_lp.z2 = 0;
+    }
+    ESP_LOGI(TAG, "Filter set: HP=%u Hz, LP=%u Hz", hp_freq, lp_freq);
+}
+
+uint16_t audio_get_hp_freq(void) { return s_hp_freq; }
+uint16_t audio_get_lp_freq(void) { return s_lp_freq; }
 
 static bool IRAM_ATTR conv_done_cb(adc_continuous_handle_t handle,
                                     const adc_continuous_evt_data_t *edata,
@@ -98,8 +174,16 @@ esp_err_t audio_read(int16_t *out_buf, size_t *out_samples)
         uint32_t data = p->type1.data;  // 12-bit unsigned [0..4095]
 
         // Convert 12-bit unsigned (centered at ~2048) to 16-bit signed PCM
-        int32_t sample = ((int32_t)data - 2048) << 4;
-        out_buf[count++] = (int16_t)sample;
+        float sample = (float)(((int32_t)data - 2048) << 4);
+
+        // Apply optional filters
+        if (s_hp.enabled) sample = biquad_process(&s_hp, sample);
+        if (s_lp.enabled) sample = biquad_process(&s_lp, sample);
+
+        int32_t out = (int32_t)sample;
+        if (out > 32767) out = 32767;
+        if (out < -32768) out = -32768;
+        out_buf[count++] = (int16_t)out;
     }
 
     *out_samples = count;

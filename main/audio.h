@@ -23,3 +23,12 @@ esp_err_t audio_read(int16_t *out_buf, size_t *out_samples);
 
 // Get ADC pool overflow count (data lost due to slow reading).
 uint32_t audio_get_overflow_count(void);
+
+// Set filter cutoff frequencies. 0 = disabled for that filter.
+// hp_freq: high-pass cutoff (e.g., 100-500 Hz to cut rumble)
+// lp_freq: low-pass cutoff (e.g., 4000-9000 Hz to cut hiss)
+void audio_set_filter(uint16_t hp_freq, uint16_t lp_freq);
+
+// Get current filter settings
+uint16_t audio_get_hp_freq(void);
+uint16_t audio_get_lp_freq(void);
