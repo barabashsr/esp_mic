@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Audio Recorder</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; max-width: 600px; margin: 0 auto; }
+h1 { font-size: 1.3em; margin-bottom: 16px; color: #e94560; }
+.card { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.card h2 { font-size: 1em; margin-bottom: 10px; color: #0f3460; color: #a8d8ea; }
+button { background: #e94560; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em; margin: 4px; }
+button:hover { opacity: 0.85; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.secondary { background: #0f3460; }
+button.danger { background: #c0392b; }
+.status { font-size: 0.85em; color: #888; margin-top: 6px; }
+#meter { width: 100%; height: 20px; background: #0a0a1a; border-radius: 4px; overflow: hidden; margin: 8px 0; }
+#meter-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #27ae60, #f39c12, #e74c3c); transition: width 50ms; }
+#files { list-style: none; }
+#files li { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #0a0a1a; font-size: 0.9em; }
+#files li:last-child { border: none; }
+.file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-size { color: #888; margin: 0 8px; font-size: 0.8em; white-space: nowrap; }
+.ws-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.ws-status.connected { background: #27ae60; }
+.ws-status.disconnected { background: #c0392b; }
+</style>
+</head>
+<body>
+<h1><span class="ws-status disconnected" id="ws-dot"></span>ESP32 Audio Recorder</h1>
+
+<div class="card">
+  <h2>Live Audio</h2>
+  <div id="meter"><div id="meter-bar"></div></div>
+  <button id="btn-listen" onclick="toggleListen()">Start Listening</button>
+  <div class="status" id="audio-status">Click to start</div>
+</div>
+
+<div class="card">
+  <h2>Recording</h2>
+  <button id="btn-rec" onclick="toggleRec()" disabled>Start Recording</button>
+  <div class="status" id="rec-status">Connect to start</div>
+</div>
+
+<div class="card">
+  <h2>Files</h2>
+  <ul id="files"><li>Loading...</li></ul>
+  <button class="secondary" onclick="loadFiles()">Refresh</button>
+  <div class="status" id="sd-status"></div>
+</div>
+
+<script>
+const SAMPLE_RATE = 20000;
+let ws = null;
+let audioCtx = null;
+let listening = false;
+let recording = false;
+let nextPlayTime = 0;
+
+function toggleListen() {
+  if (!listening) startListen();
+  else stopListen();
+}
+
+function startListen() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  nextPlayTime = 0;
+  connectWS();
+  listening = true;
+  document.getElementById('btn-listen').textContent = 'Stop Listening';
+  document.getElementById('audio-status').textContent = 'Connecting...';
+}
+
+function stopListen() {
+  listening = false;
+  if (ws) { ws.close(); ws = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  document.getElementById('btn-listen').textContent = 'Start Listening';
+  document.getElementById('audio-status').textContent = 'Stopped';
+  document.getElementById('meter-bar').style.width = '0%';
+  document.getElementById('ws-dot').className = 'ws-status disconnected';
+  document.getElementById('btn-rec').disabled = true;
+}
+
+function connectWS() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = function() {
+    document.getElementById('ws-dot').className = 'ws-status connected';
+    document.getElementById('audio-status').textContent = 'Listening...';
+    document.getElementById('btn-rec').disabled = false;
+    loadFiles();
+    loadStatus();
+  };
+
+  ws.onmessage = function(e) {
+    if (e.data instanceof ArrayBuffer) {
+      playAudio(e.data);
+    } else {
+      // JSON status update
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.recording !== undefined) {
+          recording = msg.recording;
+          document.getElementById('btn-rec').textContent = recording ? 'Stop Recording' : 'Start Recording';
+          document.getElementById('rec-status').textContent = recording ? 'Recording: ' + (msg.filename || '') : 'Idle';
+        }
+      } catch(ex) {}
+    }
+  };
+
+  ws.onclose = function() {
+    document.getElementById('ws-dot').className = 'ws-status disconnected';
+    document.getElementById('btn-rec').disabled = true;
+    if (listening) {
+      document.getElementById('audio-status').textContent = 'Reconnecting...';
+      setTimeout(connectWS, 2000);
+    }
+  };
+}
+
+function playAudio(buf) {
+  if (!audioCtx) return;
+  const int16 = new Int16Array(buf);
+  const float32 = new Float32Array(int16.length);
+
+  // Convert int16 to float32 and compute RMS
+  let sumSq = 0;
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / 32768;
+    sumSq += float32[i] * float32[i];
+  }
+  const rms = Math.sqrt(sumSq / int16.length);
+  const pct = Math.min(100, rms * 300);
+  document.getElementById('meter-bar').style.width = pct + '%';
+
+  // Schedule playback
+  const audioBuffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
+  audioBuffer.getChannelData(0).set(float32);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  if (nextPlayTime < now) nextPlayTime = now;
+  source.start(nextPlayTime);
+  nextPlayTime += audioBuffer.duration;
+}
+
+function toggleRec() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const cmd = recording ? 'stop_rec' : 'start_rec';
+  ws.send(JSON.stringify({ cmd: cmd }));
+}
+
+function loadFiles() {
+  fetch('/api/files').then(r => r.json()).then(files => {
+    const ul = document.getElementById('files');
+    if (files.length === 0) {
+      ul.innerHTML = '<li>No recordings yet</li>';
+      return;
+    }
+    ul.innerHTML = '';
+    files.forEach(f => {
+      const li = document.createElement('li');
+      const sizeMB = (f.size / 1024 / 1024).toFixed(2);
+      li.innerHTML =
+        '<span class="file-name">' + f.name + '</span>' +
+        '<span class="file-size">' + sizeMB + ' MB</span>' +
+        '<button class="secondary" onclick="playFile(\'' + f.name + '\')">Play</button>' +
+        '<button class="secondary" onclick="dlFile(\'' + f.name + '\')">DL</button>' +
+        '<button class="danger" onclick="delFile(\'' + f.name + '\')">Del</button>';
+      ul.appendChild(li);
+    });
+  }).catch(() => {
+    document.getElementById('files').innerHTML = '<li>Error loading files</li>';
+  });
+}
+
+function loadStatus() {
+  fetch('/api/status').then(r => r.json()).then(s => {
+    let txt = '';
+    if (s.sd_free_mb !== undefined) txt += 'SD free: ' + s.sd_free_mb.toFixed(1) + ' MB';
+    if (s.rssi !== undefined) txt += ' | RSSI: ' + s.rssi + ' dBm';
+    document.getElementById('sd-status').textContent = txt;
+  }).catch(() => {});
+}
+
+function playFile(name) {
+  const a = new Audio('/api/files/' + name);
+  a.play();
+}
+
+function dlFile(name) {
+  const a = document.createElement('a');
+  a.href = '/api/files/' + name;
+  a.download = name;
+  a.click();
+}
+
+function delFile(name) {
+  if (!confirm('Delete ' + name + '?')) return;
+  fetch('/api/files/' + name, { method: 'DELETE' }).then(() => loadFiles());
+}
+
+// Auto-refresh status every 10s if connected
+setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) loadStatus(); }, 10000);
+</script>
+</body>
+</html>
