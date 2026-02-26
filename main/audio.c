@@ -21,13 +21,17 @@ static bool IRAM_ATTR conv_done_cb(adc_continuous_handle_t handle,
     return (must_yield == pdTRUE);
 }
 
+static volatile uint32_t s_pool_ovf_count = 0;
+
 static bool IRAM_ATTR pool_ovf_cb(adc_continuous_handle_t handle,
                                     const adc_continuous_evt_data_t *edata,
                                     void *user_data)
 {
-    // Just a warning — data was lost
+    s_pool_ovf_count++;
     return false;
 }
+
+uint32_t audio_get_overflow_count(void) { return s_pool_ovf_count; }
 
 esp_err_t audio_init(void)
 {

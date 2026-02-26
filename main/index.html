@@ -40,8 +40,8 @@ button.danger { background: #c0392b; }
 
 <div class="card">
   <h2>Recording</h2>
-  <button id="btn-rec" onclick="toggleRec()" disabled>Start Recording</button>
-  <div class="status" id="rec-status">Connect to start</div>
+  <button id="btn-rec" onclick="toggleRec()">Start Recording</button>
+  <div class="status" id="rec-status">Idle</div>
 </div>
 
 <div class="card">
@@ -81,7 +81,6 @@ function stopListen() {
   document.getElementById('audio-status').textContent = 'Stopped';
   document.getElementById('meter-bar').style.width = '0%';
   document.getElementById('ws-dot').className = 'ws-status disconnected';
-  document.getElementById('btn-rec').disabled = true;
 }
 
 function connectWS() {
@@ -99,22 +98,11 @@ function connectWS() {
   ws.onmessage = function(e) {
     if (e.data instanceof ArrayBuffer) {
       playAudio(e.data);
-    } else {
-      // JSON status update
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.recording !== undefined) {
-          recording = msg.recording;
-          document.getElementById('btn-rec').textContent = recording ? 'Stop Recording' : 'Start Recording';
-          document.getElementById('rec-status').textContent = recording ? 'Recording: ' + (msg.filename || '') : 'Idle';
-        }
-      } catch(ex) {}
     }
   };
 
   ws.onclose = function() {
     document.getElementById('ws-dot').className = 'ws-status disconnected';
-    document.getElementById('btn-rec').disabled = true;
     if (listening) {
       document.getElementById('audio-status').textContent = 'Reconnecting...';
       setTimeout(connectWS, 2000);
@@ -152,9 +140,10 @@ function playAudio(buf) {
 }
 
 function toggleRec() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const cmd = recording ? 'stop_rec' : 'start_rec';
-  ws.send(JSON.stringify({ cmd: cmd }));
+  const action = recording ? 'stop' : 'start';
+  fetch('/api/rec/' + action, { method: 'POST' }).then(() => {
+    setTimeout(loadStatus, 500);
+  });
 }
 
 function loadFiles() {
@@ -187,6 +176,15 @@ function loadStatus() {
     if (s.sd_free_mb !== undefined) txt += 'SD free: ' + s.sd_free_mb.toFixed(1) + ' MB';
     if (s.rssi !== undefined) txt += ' | RSSI: ' + s.rssi + ' dBm';
     document.getElementById('sd-status').textContent = txt;
+    // Update recording state
+    if (s.recording !== undefined) {
+      const wasRecording = recording;
+      recording = s.recording;
+      document.getElementById('btn-rec').textContent = recording ? 'Stop Recording' : 'Start Recording';
+      document.getElementById('rec-status').textContent = recording ? 'Recording: ' + (s.filename || '') : 'Idle';
+      // Refresh file list when recording just stopped
+      if (wasRecording && !recording) loadFiles();
+    }
   }).catch(() => {});
 }
 
@@ -207,8 +205,12 @@ function delFile(name) {
   fetch('/api/files/' + name, { method: 'DELETE' }).then(() => loadFiles());
 }
 
-// Auto-refresh status every 10s if connected
-setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) loadStatus(); }, 10000);
+// Load on page open
+loadFiles();
+loadStatus();
+
+// Auto-refresh status every 3s
+setInterval(loadStatus, 3000);
 </script>
 </body>
 </html>

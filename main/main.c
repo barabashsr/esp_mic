@@ -24,6 +24,15 @@ static volatile bool s_rec_request_stop = false;
 static FILE *s_wav_file = NULL;
 static char s_rec_filename[32];
 
+// Write buffer — accumulate PCM in PSRAM, flush to SD in larger chunks
+#define WRITE_BUF_SAMPLES  8000  // 8000 samples = 16KB = ~400ms @ 20kHz
+static int16_t *s_write_buf = NULL;
+static size_t s_write_buf_pos = 0;  // current position in samples
+
+// Getters for webserver status endpoint
+bool main_is_recording(void) { return s_recording; }
+const char *main_rec_filename(void) { return s_rec_filename; }
+
 // Scan existing rec_NNN.wav files and return the next number
 static int next_rec_number(void)
 {
@@ -54,6 +63,15 @@ static void on_ws_command(const char *cmd)
     xSemaphoreGive(s_rec_mutex);
 }
 
+// Flush write buffer to SD
+static void flush_write_buf(void)
+{
+    if (s_write_buf_pos > 0 && s_wav_file) {
+        wav_write(s_wav_file, s_write_buf, s_write_buf_pos);
+        s_write_buf_pos = 0;
+    }
+}
+
 // Audio pipeline task — pinned to core 1
 static void audio_pipeline_task(void *arg)
 {
@@ -66,8 +84,18 @@ static void audio_pipeline_task(void *arg)
         return;
     }
 
+    // Allocate write buffer in PSRAM
+    s_write_buf = heap_caps_malloc(WRITE_BUF_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_write_buf) {
+        ESP_LOGE(TAG, "Failed to allocate write buffer in PSRAM");
+        vTaskDelete(NULL);
+        return;
+    }
+
     ESP_ERROR_CHECK(audio_start());
     ESP_LOGI(TAG, "Audio pipeline running on core %d", xPortGetCoreID());
+
+    static int space_check_count = 0;
 
     while (1) {
         // Wait for ADC data notification
@@ -93,13 +121,15 @@ static void audio_pipeline_task(void *arg)
                 snprintf(path, sizeof(path), "%s/%s", SD_MOUNT_POINT, s_rec_filename);
 
                 // Check free space (need at least 1MB)
-                uint64_t free = sdcard_free_bytes();
-                if (free < 1024 * 1024) {
+                uint64_t free_space = sdcard_free_bytes();
+                if (free_space < 1024 * 1024) {
                     ESP_LOGW(TAG, "SD card full, cannot start recording");
                 } else {
                     s_wav_file = wav_open(path, AUDIO_SAMPLE_RATE, 16, 1);
                     if (s_wav_file) {
                         s_recording = true;
+                        s_write_buf_pos = 0;
+                        space_check_count = 0;
                         ESP_LOGI(TAG, "Recording started: %s", s_rec_filename);
                     }
                 }
@@ -107,22 +137,34 @@ static void audio_pipeline_task(void *arg)
 
             if (s_rec_request_stop && s_recording) {
                 s_rec_request_stop = false;
+                flush_write_buf();
                 s_recording = false;
                 wav_close(s_wav_file);
                 s_wav_file = NULL;
                 ESP_LOGI(TAG, "Recording stopped: %s", s_rec_filename);
             }
 
-            // Write to WAV if recording
+            // Buffer audio for recording
             if (s_recording && s_wav_file) {
-                wav_write(s_wav_file, pcm_buf, num_samples);
+                // Copy samples into write buffer
+                size_t to_copy = num_samples;
+                if (s_write_buf_pos + to_copy > WRITE_BUF_SAMPLES) {
+                    to_copy = WRITE_BUF_SAMPLES - s_write_buf_pos;
+                }
+                memcpy(&s_write_buf[s_write_buf_pos], pcm_buf, to_copy * sizeof(int16_t));
+                s_write_buf_pos += to_copy;
 
-                // Check SD space periodically (every ~1 second worth of data)
-                static int write_count = 0;
-                if (++write_count >= 50) {  // ~50 * 20ms = 1 second
-                    write_count = 0;
+                // Flush when buffer is full
+                if (s_write_buf_pos >= WRITE_BUF_SAMPLES) {
+                    flush_write_buf();
+                }
+
+                // Check SD space every ~5 seconds
+                if (++space_check_count >= 250) {
+                    space_check_count = 0;
                     if (sdcard_free_bytes() < 512 * 1024) {
                         ESP_LOGW(TAG, "SD card nearly full, stopping recording");
+                        flush_write_buf();
                         s_recording = false;
                         wav_close(s_wav_file);
                         s_wav_file = NULL;

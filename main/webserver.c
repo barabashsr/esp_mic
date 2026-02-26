@@ -211,6 +211,21 @@ static esp_err_t api_file_delete_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_rec_handler(httpd_req_t *req)
+{
+    if (s_cmd_cb) {
+        // POST /api/rec/start or /api/rec/stop
+        const char *action = req->uri + strlen("/api/rec/");
+        if (strcmp(action, "start") == 0) {
+            s_cmd_cb("start_rec");
+        } else if (strcmp(action, "stop") == 0) {
+            s_cmd_cb("stop_rec");
+        }
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
     cJSON *obj = cJSON_CreateObject();
@@ -225,8 +240,18 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(obj, "rssi", ap_info.rssi);
     }
 
-    // Recording state is managed by main.c, will be added via query
-    // For now just return what we have
+    // Recording state — provided by main.c via getter
+    extern bool main_is_recording(void);
+    extern const char *main_rec_filename(void);
+    bool rec = main_is_recording();
+    cJSON_AddBoolToObject(obj, "recording", rec);
+    if (rec) {
+        cJSON_AddStringToObject(obj, "filename", main_rec_filename());
+    }
+
+    // ADC overflow count
+    extern uint32_t audio_get_overflow_count(void);
+    cJSON_AddNumberToObject(obj, "adc_overflows", audio_get_overflow_count());
 
     char *json_str = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
@@ -247,7 +272,7 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.close_fn = ws_close_callback;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -263,6 +288,13 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
         .is_websocket = true,
     };
     httpd_register_uri_handler(s_server, &uri_ws);
+
+    httpd_uri_t uri_rec = {
+        .uri = "/api/rec/*",
+        .method = HTTP_POST,
+        .handler = api_rec_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_rec);
 
     httpd_uri_t uri_status = {
         .uri = "/api/status",

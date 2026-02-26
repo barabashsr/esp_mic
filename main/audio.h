@@ -20,3 +20,6 @@ esp_err_t audio_stop(void);
 // out_samples receives the number of int16_t samples written.
 // Returns ESP_OK on success, ESP_ERR_TIMEOUT if no data available.
 esp_err_t audio_read(int16_t *out_buf, size_t *out_samples);
+
+// Get ADC pool overflow count (data lost due to slow reading).
+uint32_t audio_get_overflow_count(void);
