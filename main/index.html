@@ -15,17 +15,24 @@ button:hover { opacity: 0.85; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 button.secondary { background: #0f3460; }
 button.danger { background: #c0392b; }
+button.active { background: #27ae60; }
 .status { font-size: 0.85em; color: #888; margin-top: 6px; }
 #meter { width: 100%; height: 20px; background: #0a0a1a; border-radius: 4px; overflow: hidden; margin: 8px 0; }
 #meter-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #27ae60, #f39c12, #e74c3c); transition: width 50ms; }
 #files { list-style: none; }
-#files li { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #0a0a1a; font-size: 0.9em; }
+#files li { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #0a0a1a; font-size: 0.9em; flex-wrap: wrap; }
 #files li:last-child { border: none; }
 .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-size { color: #888; margin: 0 8px; font-size: 0.8em; white-space: nowrap; }
+.file-info { color: #888; margin: 0 8px; font-size: 0.8em; white-space: nowrap; }
 .ws-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .ws-status.connected { background: #27ae60; }
 .ws-status.disconnected { background: #c0392b; }
+.rms-container { position: relative; width: 100%; height: 20px; background: #0a0a1a; border-radius: 4px; overflow: hidden; margin: 8px 0; }
+.rms-bar { height: 100%; width: 0%; background: #27ae60; transition: width 0.3s; }
+.rms-threshold { position: absolute; top: 0; height: 100%; width: 2px; background: #e94560; }
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.slider-row input[type=range] { flex: 1; }
+.slider-row span { font-size: 0.85em; min-width: 40px; }
 </style>
 </head>
 <body>
@@ -45,6 +52,21 @@ button.danger { background: #c0392b; }
 </div>
 
 <div class="card">
+  <h2>Auto-Record</h2>
+  <button id="btn-auto" onclick="toggleAuto()">Enable Auto-Record</button>
+  <div class="slider-row">
+    <span>Threshold:</span>
+    <input type="range" id="auto-threshold" min="100" max="10000" step="100" value="2000" oninput="updateThreshold(this.value)">
+    <span id="threshold-val">2000</span>
+  </div>
+  <div class="rms-container">
+    <div class="rms-bar" id="rms-bar"></div>
+    <div class="rms-threshold" id="rms-threshold" style="left:20%"></div>
+  </div>
+  <div class="status" id="auto-status">Disabled</div>
+</div>
+
+<div class="card">
   <h2>Files</h2>
   <ul id="files"><li>Loading...</li></ul>
   <button class="secondary" onclick="loadFiles()">Refresh</button>
@@ -57,7 +79,9 @@ let ws = null;
 let audioCtx = null;
 let listening = false;
 let recording = false;
+let autoMode = false;
 let nextPlayTime = 0;
+let thresholdTimer = null;
 
 function toggleListen() {
   if (!listening) startListen();
@@ -115,7 +139,6 @@ function playAudio(buf) {
   const int16 = new Int16Array(buf);
   const float32 = new Float32Array(int16.length);
 
-  // Convert int16 to float32 and compute RMS
   let sumSq = 0;
   for (let i = 0; i < int16.length; i++) {
     float32[i] = int16[i] / 32768;
@@ -125,7 +148,6 @@ function playAudio(buf) {
   const pct = Math.min(100, rms * 300);
   document.getElementById('meter-bar').style.width = pct + '%';
 
-  // Schedule playback
   const audioBuffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
   audioBuffer.getChannelData(0).set(float32);
 
@@ -146,6 +168,36 @@ function toggleRec() {
   });
 }
 
+function toggleAuto() {
+  const newMode = !autoMode;
+  fetch('/api/auto', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: newMode })
+  }).then(() => {
+    setTimeout(loadStatus, 300);
+  });
+}
+
+function updateThreshold(val) {
+  document.getElementById('threshold-val').textContent = val;
+  updateThresholdMarker(val);
+  // Debounce the API call
+  if (thresholdTimer) clearTimeout(thresholdTimer);
+  thresholdTimer = setTimeout(() => {
+    fetch('/api/auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threshold: parseInt(val) })
+    });
+  }, 300);
+}
+
+function updateThresholdMarker(thr) {
+  const pct = Math.min(100, (thr / 10000) * 100);
+  document.getElementById('rms-threshold').style.left = pct + '%';
+}
+
 function loadFiles() {
   fetch('/api/files').then(r => r.json()).then(files => {
     const ul = document.getElementById('files');
@@ -157,9 +209,11 @@ function loadFiles() {
     files.forEach(f => {
       const li = document.createElement('li');
       const sizeMB = (f.size / 1024 / 1024).toFixed(2);
+      let info = sizeMB + ' MB';
+      if (f.modified) info += ' | ' + f.modified;
       li.innerHTML =
         '<span class="file-name">' + f.name + '</span>' +
-        '<span class="file-size">' + sizeMB + ' MB</span>' +
+        '<span class="file-info">' + info + '</span>' +
         '<button class="secondary" onclick="playFile(\'' + f.name + '\')">Play</button>' +
         '<button class="secondary" onclick="dlFile(\'' + f.name + '\')">DL</button>' +
         '<button class="danger" onclick="delFile(\'' + f.name + '\')">Del</button>';
@@ -176,14 +230,51 @@ function loadStatus() {
     if (s.sd_free_mb !== undefined) txt += 'SD free: ' + s.sd_free_mb.toFixed(1) + ' MB';
     if (s.rssi !== undefined) txt += ' | RSSI: ' + s.rssi + ' dBm';
     document.getElementById('sd-status').textContent = txt;
+
     // Update recording state
     if (s.recording !== undefined) {
       const wasRecording = recording;
       recording = s.recording;
       document.getElementById('btn-rec').textContent = recording ? 'Stop Recording' : 'Start Recording';
-      document.getElementById('rec-status').textContent = recording ? 'Recording: ' + (s.filename || '') : 'Idle';
-      // Refresh file list when recording just stopped
+      if (recording) {
+        let src = s.rec_source === 'auto' ? 'auto' : 'manual';
+        let recTxt = 'Recording (' + src + '): ' + (s.filename || '');
+        if (s.rec_started_at) recTxt += ' | started ' + s.rec_started_at;
+        document.getElementById('rec-status').textContent = recTxt;
+      } else {
+        document.getElementById('rec-status').textContent = 'Idle';
+      }
       if (wasRecording && !recording) loadFiles();
+    }
+
+    // Update auto-record state
+    if (s.auto_mode !== undefined) {
+      autoMode = s.auto_mode;
+      const btn = document.getElementById('btn-auto');
+      btn.textContent = autoMode ? 'Disable Auto-Record' : 'Enable Auto-Record';
+      btn.className = autoMode ? 'active' : '';
+
+      let autoTxt;
+      if (!autoMode) {
+        autoTxt = 'Disabled';
+      } else if (s.recording && s.rec_source === 'auto') {
+        autoTxt = 'Auto-recording...';
+      } else {
+        autoTxt = 'Monitoring...';
+      }
+      document.getElementById('auto-status').textContent = autoTxt;
+    }
+
+    if (s.auto_threshold !== undefined) {
+      document.getElementById('auto-threshold').value = s.auto_threshold;
+      document.getElementById('threshold-val').textContent = s.auto_threshold;
+      updateThresholdMarker(s.auto_threshold);
+    }
+
+    // Update RMS bar
+    if (s.current_rms !== undefined) {
+      const rmsPct = Math.min(100, (s.current_rms / 10000) * 100);
+      document.getElementById('rms-bar').style.width = rmsPct + '%';
     }
   }).catch(() => {});
 }

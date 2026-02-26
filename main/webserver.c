@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
@@ -144,6 +145,16 @@ static esp_err_t api_files_handler(httpd_req_t *req)
         cJSON *obj = cJSON_CreateObject();
         cJSON_AddStringToObject(obj, "name", ent->d_name);
         cJSON_AddNumberToObject(obj, "size", st.st_size);
+
+        // Format modification time
+        struct tm ti;
+        localtime_r(&st.st_mtime, &ti);
+        char timebuf[80];
+        snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02d %02d:%02d:%02d",
+                 ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+                 ti.tm_hour, ti.tm_min, ti.tm_sec);
+        cJSON_AddStringToObject(obj, "modified", timebuf);
+
         cJSON_AddItemToArray(arr, obj);
     }
     closedir(dir);
@@ -211,6 +222,52 @@ static esp_err_t api_file_delete_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_auto_handler(httpd_req_t *req)
+{
+    extern void main_set_auto_mode(bool enabled);
+    extern void main_set_auto_threshold(uint16_t thr);
+    extern bool main_auto_mode(void);
+    extern uint16_t main_auto_threshold(void);
+
+    char buf[128];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *enabled = cJSON_GetObjectItem(json, "enabled");
+    if (enabled && cJSON_IsBool(enabled)) {
+        main_set_auto_mode(cJSON_IsTrue(enabled));
+    }
+
+    cJSON *threshold = cJSON_GetObjectItem(json, "threshold");
+    if (threshold && cJSON_IsNumber(threshold)) {
+        main_set_auto_threshold((uint16_t)threshold->valueint);
+    }
+
+    cJSON_Delete(json);
+
+    // Return current state
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "auto_mode", main_auto_mode());
+    cJSON_AddNumberToObject(resp, "auto_threshold", main_auto_threshold());
+    char *json_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ESP_OK;
+}
+
 static esp_err_t api_rec_handler(httpd_req_t *req)
 {
     if (s_cmd_cb) {
@@ -240,18 +297,34 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(obj, "rssi", ap_info.rssi);
     }
 
-    // Recording state — provided by main.c via getter
+    // Recording state -- provided by main.c via getters
     extern bool main_is_recording(void);
     extern const char *main_rec_filename(void);
+    extern const char *main_rec_start_time(void);
+    extern const char *main_rec_source_str(void);
+    extern uint16_t main_current_rms(void);
+    extern bool main_auto_mode(void);
+    extern uint16_t main_auto_threshold(void);
+
     bool rec = main_is_recording();
     cJSON_AddBoolToObject(obj, "recording", rec);
     if (rec) {
         cJSON_AddStringToObject(obj, "filename", main_rec_filename());
+        const char *start_time = main_rec_start_time();
+        if (start_time[0]) {
+            cJSON_AddStringToObject(obj, "rec_started_at", start_time);
+        }
+        cJSON_AddStringToObject(obj, "rec_source", main_rec_source_str());
     }
 
     // ADC overflow count
     extern uint32_t audio_get_overflow_count(void);
     cJSON_AddNumberToObject(obj, "adc_overflows", audio_get_overflow_count());
+
+    // Auto-record state
+    cJSON_AddBoolToObject(obj, "auto_mode", main_auto_mode());
+    cJSON_AddNumberToObject(obj, "auto_threshold", main_auto_threshold());
+    cJSON_AddNumberToObject(obj, "current_rms", main_current_rms());
 
     char *json_str = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
@@ -272,7 +345,7 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.close_fn = ws_close_callback;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 12;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -288,6 +361,13 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
         .is_websocket = true,
     };
     httpd_register_uri_handler(s_server, &uri_ws);
+
+    httpd_uri_t uri_auto = {
+        .uri = "/api/auto",
+        .method = HTTP_POST,
+        .handler = api_auto_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_auto);
 
     httpd_uri_t uri_rec = {
         .uri = "/api/rec/*",
