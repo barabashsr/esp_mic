@@ -9,7 +9,7 @@
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; max-width: 600px; margin: 0 auto; }
 h1 { font-size: 1.3em; margin-bottom: 16px; color: #e94560; }
 .card { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-.card h2 { font-size: 1em; margin-bottom: 10px; color: #0f3460; color: #a8d8ea; }
+.card h2 { font-size: 1em; margin-bottom: 10px; color: #a8d8ea; }
 button { background: #e94560; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em; margin: 4px; }
 button:hover { opacity: 0.85; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -19,11 +19,6 @@ button.active { background: #27ae60; }
 .status { font-size: 0.85em; color: #888; margin-top: 6px; }
 #meter { width: 100%; height: 20px; background: #0a0a1a; border-radius: 4px; overflow: hidden; margin: 8px 0; }
 #meter-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #27ae60, #f39c12, #e74c3c); transition: width 50ms; }
-#files { list-style: none; }
-#files li { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #0a0a1a; font-size: 0.9em; flex-wrap: wrap; }
-#files li:last-child { border: none; }
-.file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-info { color: #888; margin: 0 8px; font-size: 0.8em; white-space: nowrap; }
 .ws-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .ws-status.connected { background: #27ae60; }
 .ws-status.disconnected { background: #c0392b; }
@@ -33,6 +28,23 @@ button.active { background: #27ae60; }
 .slider-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .slider-row input[type=range] { flex: 1; }
 .slider-row span { font-size: 0.85em; min-width: 40px; }
+.date-header { font-size: 0.85em; color: #a8d8ea; padding: 8px 0 4px; border-bottom: 1px solid #0f3460; margin-top: 8px; font-weight: 600; }
+.date-header:first-child { margin-top: 0; }
+.file-row { padding: 6px 0; border-bottom: 1px solid #0a0a1a; font-size: 0.9em; }
+.file-row:last-child { border: none; }
+.file-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-info { color: #888; margin: 0 8px; font-size: 0.8em; white-space: nowrap; }
+.file-actions { white-space: nowrap; }
+.file-actions button { padding: 4px 10px; font-size: 0.8em; margin: 2px; }
+.wave-wrap { position: relative; margin-top: 4px; }
+.file-wave { width: 100%; height: 48px; border-radius: 4px; background: #0a0a1a; cursor: pointer; display: block; }
+.playhead { position: absolute; top: 0; left: 0; width: 2px; height: 100%; background: #27ae60; pointer-events: none; display: none; }
+.wifi-banner { background: #e94560; color: white; padding: 10px; border-radius: 4px; margin-bottom: 10px; font-size: 0.9em; text-align: center; }
+.wifi-status-line { font-size: 0.85em; color: #888; margin-bottom: 8px; }
+.wifi-saved { font-size: 0.8em; color: #666; margin-top: 4px; }
+select { background: #0a0a1a; color: #eee; border: 1px solid #0f3460; border-radius: 4px; padding: 6px; font-size: 0.9em; width: 100%; margin: 4px 0; }
+input[type=password] { background: #0a0a1a; color: #eee; border: 1px solid #0f3460; border-radius: 4px; padding: 6px; font-size: 0.9em; width: 100%; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -55,7 +67,7 @@ button.active { background: #27ae60; }
   <h2>Settings</h2>
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
     <input type="checkbox" id="chk-ulaw" onchange="toggleUlaw(this.checked)">
-    <span>µ-law compression (2:1, smaller files)</span>
+    <span>u-law compression (2:1, smaller files)</span>
   </label>
   <hr style="border-color:#0a0a1a;margin:10px 0">
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -74,6 +86,17 @@ button.active { background: #27ae60; }
       <span id="filter-lp-val">Off</span>
     </div>
   </div>
+  <hr style="border-color:#0a0a1a;margin:10px 0">
+  <h2 style="margin-top:4px">WiFi</h2>
+  <div id="wifi-banner"></div>
+  <div class="wifi-status-line" id="wifi-status">Loading...</div>
+  <div id="wifi-scan-section">
+    <button class="secondary" id="btn-wifi-scan" onclick="wifiScan()">Scan Networks</button>
+    <select id="wifi-scan-list" style="display:none"></select>
+    <input type="password" id="wifi-pass" placeholder="Password" style="display:none">
+    <button id="btn-wifi-connect" onclick="wifiConnect()" style="display:none">Connect</button>
+  </div>
+  <div class="wifi-saved" id="wifi-saved"></div>
 </div>
 
 <div class="card">
@@ -94,23 +117,38 @@ button.active { background: #27ae60; }
 
 <div class="card">
   <h2>Files</h2>
-  <ul id="files"><li>Loading...</li></ul>
-  <button class="secondary" onclick="loadFiles()">Refresh</button>
+  <div id="page-nav-top" style="display:none;margin-bottom:8px;text-align:center">
+    <button class="secondary" id="btn-prev-top" onclick="prevPage()">&lt; Prev</button>
+    <span id="page-info-top" style="font-size:0.85em;color:#888;margin:0 8px"></span>
+    <button class="secondary" id="btn-next-top" onclick="nextPage()">Next &gt;</button>
+  </div>
+  <div id="files"><div class="file-row">Loading...</div></div>
+  <div id="page-nav-bot" style="display:none;margin-top:8px;text-align:center">
+    <button class="secondary" id="btn-prev-bot" onclick="prevPage()">&lt; Prev</button>
+    <span id="page-info-bot" style="font-size:0.85em;color:#888;margin:0 8px"></span>
+    <button class="secondary" id="btn-next-bot" onclick="nextPage()">Next &gt;</button>
+  </div>
+  <button class="secondary" onclick="loadFiles()" style="margin-top:8px">Refresh</button>
   <div class="status" id="sd-status"></div>
 </div>
 
 <script>
-const SAMPLE_RATE = 20000;
-let ws = null;
-let audioCtx = null;
-let listening = false;
-let recording = false;
-let autoMode = false;
-let nextPlayTime = 0;
-let thresholdTimer = null;
-let filterTimer = null;
-let currentAudio = null;
-let currentPlayingName = null;
+var SAMPLE_RATE = 20000;
+var ws = null;
+var audioCtx = null;
+var listening = false;
+var recording = false;
+var autoMode = false;
+var nextPlayTime = 0;
+var thresholdTimer = null;
+var filterTimer = null;
+var currentAudio = null;
+var currentPlayingName = null;
+var waveformCache = {};
+var playheadRaf = null;
+var allFiles = [];
+var datePages = [];
+var currentPage = 0;
 
 function toggleListen() {
   if (!listening) startListen();
@@ -150,7 +188,7 @@ function connectWS() {
 
   ws.onmessage = function(e) {
     if (e.data instanceof ArrayBuffer) {
-      playAudio(e.data);
+      playAudioChunk(e.data);
     }
   };
 
@@ -163,47 +201,47 @@ function connectWS() {
   };
 }
 
-function playAudio(buf) {
+function playAudioChunk(buf) {
   if (!audioCtx) return;
-  const int16 = new Int16Array(buf);
-  const float32 = new Float32Array(int16.length);
+  var int16 = new Int16Array(buf);
+  var float32 = new Float32Array(int16.length);
 
-  let sumSq = 0;
-  for (let i = 0; i < int16.length; i++) {
+  var sumSq = 0;
+  for (var i = 0; i < int16.length; i++) {
     float32[i] = int16[i] / 32768;
     sumSq += float32[i] * float32[i];
   }
-  const rms = Math.sqrt(sumSq / int16.length);
-  const pct = Math.min(100, rms * 300);
+  var rms = Math.sqrt(sumSq / int16.length);
+  var pct = Math.min(100, rms * 300);
   document.getElementById('meter-bar').style.width = pct + '%';
 
-  const audioBuffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
+  var audioBuffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
   audioBuffer.getChannelData(0).set(float32);
 
-  const source = audioCtx.createBufferSource();
+  var source = audioCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioCtx.destination);
 
-  const now = audioCtx.currentTime;
+  var now = audioCtx.currentTime;
   if (nextPlayTime < now) nextPlayTime = now;
   source.start(nextPlayTime);
   nextPlayTime += audioBuffer.duration;
 }
 
 function toggleRec() {
-  const action = recording ? 'stop' : 'start';
-  fetch('/api/rec/' + action, { method: 'POST' }).then(() => {
+  var action = recording ? 'stop' : 'start';
+  fetch('/api/rec/' + action, { method: 'POST' }).then(function() {
     setTimeout(loadStatus, 500);
   });
 }
 
 function toggleAuto() {
-  const newMode = !autoMode;
+  var newMode = !autoMode;
   fetch('/api/auto', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled: newMode })
-  }).then(() => {
+  }).then(function() {
     setTimeout(loadStatus, 300);
   });
 }
@@ -226,12 +264,12 @@ function toggleFilter(enabled) {
 }
 
 function updateFilter() {
-  const hp = parseInt(document.getElementById('filter-hp').value);
-  const lp = parseInt(document.getElementById('filter-lp').value);
+  var hp = parseInt(document.getElementById('filter-hp').value);
+  var lp = parseInt(document.getElementById('filter-lp').value);
   document.getElementById('filter-hp-val').textContent = hp + ' Hz';
   document.getElementById('filter-lp-val').textContent = lp + ' Hz';
   if (filterTimer) clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => sendFilter(hp, lp), 300);
+  filterTimer = setTimeout(function() { sendFilter(hp, lp); }, 300);
 }
 
 function sendFilter(hp, lp) {
@@ -245,9 +283,8 @@ function sendFilter(hp, lp) {
 function updateThreshold(val) {
   document.getElementById('threshold-val').textContent = val;
   updateThresholdMarker(val);
-  // Debounce the API call
   if (thresholdTimer) clearTimeout(thresholdTimer);
-  thresholdTimer = setTimeout(() => {
+  thresholdTimer = setTimeout(function() {
     fetch('/api/auto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -257,70 +294,421 @@ function updateThreshold(val) {
 }
 
 function updateThresholdMarker(thr) {
-  const pct = Math.min(100, (thr / 10000) * 100);
+  var pct = Math.min(100, (thr / 10000) * 100);
   document.getElementById('rms-threshold').style.left = pct + '%';
 }
 
+// --- Date pagination + always-visible waveforms ---
+
 function loadFiles() {
-  fetch('/api/files').then(r => r.json()).then(files => {
-    const ul = document.getElementById('files');
+  fetch('/api/files').then(function(r) { return r.json(); }).then(function(files) {
     if (files.length === 0) {
-      ul.innerHTML = '<li>No recordings yet</li>';
+      allFiles = [];
+      datePages = [];
+      currentPage = 0;
+      document.getElementById('files').innerHTML = '<div class="file-row">No recordings yet</div>';
+      updatePageNav();
       return;
     }
-    ul.innerHTML = '';
-    files.forEach(f => {
-      const li = document.createElement('li');
-      const sizeMB = (f.size / 1024 / 1024).toFixed(2);
-      let info = sizeMB + ' MB';
-      if (f.modified) info += ' | ' + f.modified;
-      li.innerHTML =
-        '<span class="file-name">' + f.name + '</span>' +
-        '<span class="file-info">' + info + '</span>' +
-        '<button class="secondary btn-play" onclick="playFile(\'' + f.name + '\')">Play</button>' +
-        '<button class="secondary btn-stop" onclick="stopPlayback()" style="display:none">Stop</button>' +
-        '<button class="secondary" onclick="showWaveform(\'' + f.name + '\', this)">Wave</button>' +
-        '<button class="secondary" onclick="dlFile(\'' + f.name + '\')">DL</button>' +
-        '<button class="danger" onclick="delFile(\'' + f.name + '\')">Del</button>';
-      ul.appendChild(li);
+
+    // Sort by modified descending (newest first)
+    files.sort(function(a, b) {
+      if (a.modified > b.modified) return -1;
+      if (a.modified < b.modified) return 1;
+      return 0;
     });
-    updatePlayButtons();
-  }).catch(() => {
-    document.getElementById('files').innerHTML = '<li>Error loading files</li>';
+
+    allFiles = files;
+
+    // Build date pages
+    var grouped = {};
+    datePages = [];
+    files.forEach(function(f) {
+      var date = (f.modified && f.modified.length >= 10) ? f.modified.substring(0, 10) : 'Unknown';
+      if (!grouped[date]) {
+        grouped[date] = [];
+        datePages.push(date);
+      }
+      grouped[date].push(f);
+    });
+
+    // Store grouped for rendering
+    allFiles._grouped = grouped;
+
+    if (currentPage >= datePages.length) currentPage = datePages.length - 1;
+    if (currentPage < 0) currentPage = 0;
+    renderPage(currentPage);
+  }).catch(function() {
+    document.getElementById('files').innerHTML = '<div class="file-row">Error loading files</div>';
   });
 }
 
+function renderPage(pageIndex) {
+  currentPage = pageIndex;
+  var container = document.getElementById('files');
+
+  if (!datePages.length || !allFiles._grouped) {
+    container.innerHTML = '<div class="file-row">No recordings yet</div>';
+    updatePageNav();
+    return;
+  }
+
+  var date = datePages[pageIndex];
+  var files = allFiles._grouped[date] || [];
+
+  container.innerHTML = '';
+
+  var header = document.createElement('div');
+  header.className = 'date-header';
+  header.textContent = date;
+  container.appendChild(header);
+
+  files.forEach(function(f) {
+    var row = document.createElement('div');
+    row.className = 'file-row';
+    row.dataset.filename = f.name;
+
+    var sizeMB = (f.size / 1024 / 1024).toFixed(2);
+    var time = (f.modified && f.modified.length > 10) ? f.modified.substring(11) : '';
+    var info = sizeMB + ' MB';
+    if (time) info += ' | ' + time;
+
+    row.innerHTML =
+      '<div class="file-top">' +
+        '<span class="file-name">' + f.name + '</span>' +
+        '<span class="file-info">' + info + '</span>' +
+        '<span class="file-actions">' +
+          '<button class="secondary btn-play" onclick="playFile(\'' + f.name + '\')">Play</button>' +
+          '<button class="secondary btn-stop" onclick="stopPlayback()" style="display:none">Stop</button>' +
+          '<button class="secondary" onclick="dlFile(\'' + f.name + '\')">DL</button>' +
+          '<button class="danger" onclick="delFile(\'' + f.name + '\')">Del</button>' +
+        '</span>' +
+      '</div>' +
+      '<div class="wave-wrap">' +
+        '<canvas class="file-wave" data-file="' + f.name + '"></canvas>' +
+        '<div class="playhead"></div>' +
+      '</div>';
+
+    container.appendChild(row);
+  });
+
+  updatePlayButtons();
+  observeWaveforms();
+  updatePageNav();
+}
+
+function updatePageNav() {
+  var show = datePages.length > 1;
+  document.getElementById('page-nav-top').style.display = show ? '' : 'none';
+  document.getElementById('page-nav-bot').style.display = show ? '' : 'none';
+  if (!show) return;
+
+  var info = datePages[currentPage] + ' (' + (currentPage + 1) + ' of ' + datePages.length + ')';
+  document.getElementById('page-info-top').textContent = info;
+  document.getElementById('page-info-bot').textContent = info;
+
+  var atFirst = currentPage === 0;
+  var atLast = currentPage === datePages.length - 1;
+  document.getElementById('btn-prev-top').disabled = atFirst;
+  document.getElementById('btn-prev-bot').disabled = atFirst;
+  document.getElementById('btn-next-top').disabled = atLast;
+  document.getElementById('btn-next-bot').disabled = atLast;
+}
+
+function prevPage() {
+  if (currentPage > 0) renderPage(currentPage - 1);
+}
+
+function nextPage() {
+  if (currentPage < datePages.length - 1) renderPage(currentPage + 1);
+}
+
+// --- Waveform lazy loading via IntersectionObserver ---
+
+var waveObserver = null;
+
+function observeWaveforms() {
+  if (waveObserver) waveObserver.disconnect();
+
+  var canvases = document.querySelectorAll('.file-wave');
+  if (!canvases.length) return;
+
+  waveObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        loadWaveform(entry.target);
+        waveObserver.unobserve(entry.target);
+      }
+    });
+  }, { rootMargin: '100px' });
+
+  canvases.forEach(function(c) {
+    waveObserver.observe(c);
+  });
+}
+
+function loadWaveform(canvas) {
+  var name = canvas.dataset.file;
+  if (!name) return;
+
+  if (waveformCache[name]) {
+    drawWaveform(canvas, waveformCache[name]);
+    return;
+  }
+
+  fetch('/api/waveform?file=' + encodeURIComponent(name) + '&bins=64')
+    .then(function(r) { return r.json(); })
+    .then(function(peaks) {
+      waveformCache[name] = peaks;
+      drawWaveform(canvas, peaks);
+    })
+    .catch(function() {});
+}
+
+function drawWaveform(canvas, peaks) {
+  var dpr = window.devicePixelRatio || 1;
+  var rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+
+  var ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  var w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  var max = 0;
+  for (var i = 0; i < peaks.length; i++) {
+    if (peaks[i] > max) max = peaks[i];
+  }
+  if (max === 0) max = 1;
+
+  var barW = w / peaks.length;
+  ctx.fillStyle = '#e94560';
+  for (var i = 0; i < peaks.length; i++) {
+    var barH = (peaks[i] / max) * h;
+    ctx.fillRect(i * barW, h - barH, Math.max(barW - 1, 1), barH);
+  }
+
+  // Attach seek handlers
+  canvas.onclick = function(e) { seekFromCanvas(canvas, e); };
+  canvas.ontouchstart = function(e) {
+    e.preventDefault();
+    seekFromCanvas(canvas, e.touches[0]);
+  };
+  canvas.ontouchmove = function(e) {
+    e.preventDefault();
+    seekFromCanvas(canvas, e.touches[0]);
+  };
+}
+
+function seekFromCanvas(canvas, event) {
+  var rect = canvas.getBoundingClientRect();
+  var x = (event.clientX || event.pageX) - rect.left;
+  var frac = Math.max(0, Math.min(1, x / rect.width));
+  var name = canvas.dataset.file;
+
+  if (currentPlayingName !== name) {
+    // Start playing this file, then seek
+    playFile(name, frac);
+  } else if (currentAudio) {
+    currentAudio.currentTime = frac * currentAudio.duration;
+  }
+}
+
+// --- Playback with progress overlay ---
+
+function playFile(name, seekFrac) {
+  stopPlayback();
+  currentAudio = new Audio('/api/files/' + encodeURIComponent(name));
+  currentPlayingName = name;
+
+  currentAudio.onloadedmetadata = function() {
+    if (seekFrac !== undefined && currentAudio.duration) {
+      currentAudio.currentTime = seekFrac * currentAudio.duration;
+    }
+  };
+
+  currentAudio.play();
+  currentAudio.onended = function() { stopPlayback(); };
+  updatePlayButtons();
+  startPlayhead(name);
+}
+
+function startPlayhead(name) {
+  var row = document.querySelector('.file-row[data-filename="' + name + '"]');
+  if (!row) return;
+  var ph = row.querySelector('.playhead');
+  if (!ph) return;
+  ph.style.display = 'block';
+
+  function tick() {
+    if (!currentAudio || currentPlayingName !== name) {
+      ph.style.display = 'none';
+      return;
+    }
+    var dur = currentAudio.duration;
+    if (dur && dur > 0) {
+      var pct = (currentAudio.currentTime / dur) * 100;
+      ph.style.left = pct + '%';
+    }
+    playheadRaf = requestAnimationFrame(tick);
+  }
+  playheadRaf = requestAnimationFrame(tick);
+}
+
+function stopPlayback() {
+  if (playheadRaf) {
+    cancelAnimationFrame(playheadRaf);
+    playheadRaf = null;
+  }
+  // Hide all playheads
+  document.querySelectorAll('.playhead').forEach(function(ph) {
+    ph.style.display = 'none';
+  });
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio = null;
+  }
+  currentPlayingName = null;
+  updatePlayButtons();
+}
+
+function updatePlayButtons() {
+  document.querySelectorAll('.file-row').forEach(function(row) {
+    var name = row.dataset.filename;
+    if (!name) return;
+    var playBtn = row.querySelector('.btn-play');
+    var stopBtn = row.querySelector('.btn-stop');
+    if (playBtn && stopBtn) {
+      var playing = currentPlayingName === name;
+      playBtn.style.display = playing ? 'none' : '';
+      stopBtn.style.display = playing ? '' : 'none';
+    }
+  });
+}
+
+function dlFile(name) {
+  var a = document.createElement('a');
+  a.href = '/api/files/' + encodeURIComponent(name);
+  a.download = name;
+  a.click();
+}
+
+function delFile(name) {
+  if (!confirm('Delete ' + name + '?')) return;
+  delete waveformCache[name];
+  fetch('/api/files/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadFiles(); });
+}
+
+// --- WiFi UI ---
+
+var wifiSavedList = [];
+
+function loadWifiStatus() {
+  fetch('/api/wifi').then(function(r) { return r.json(); }).then(function(w) {
+    var banner = document.getElementById('wifi-banner');
+    if (w.mode === 'AP') {
+      banner.innerHTML = 'AP Mode &mdash; connect to a WiFi network below';
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    var line = w.mode + ': ' + w.ssid;
+    if (w.ip) line += ' (' + w.ip + ')';
+    document.getElementById('wifi-status').textContent = line;
+
+    wifiSavedList = w.saved || [];
+    if (wifiSavedList.length) {
+      document.getElementById('wifi-saved').textContent = 'Saved: ' + wifiSavedList.join(', ');
+    } else {
+      document.getElementById('wifi-saved').textContent = '';
+    }
+  }).catch(function() {});
+}
+
+function wifiScan() {
+  var btn = document.getElementById('btn-wifi-scan');
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+
+  fetch('/api/wifi/scan').then(function(r) { return r.json(); }).then(function(aps) {
+    var sel = document.getElementById('wifi-scan-list');
+    sel.innerHTML = '';
+    aps.forEach(function(ap) {
+      var opt = document.createElement('option');
+      var saved = wifiSavedList.indexOf(ap.ssid) >= 0;
+      opt.value = ap.ssid;
+      opt.textContent = ap.ssid + ' (' + ap.rssi + ' dBm)' + (saved ? ' *' : '');
+      sel.appendChild(opt);
+    });
+    sel.style.display = 'block';
+    document.getElementById('wifi-pass').style.display = 'block';
+    document.getElementById('btn-wifi-connect').style.display = '';
+    btn.textContent = 'Scan Networks';
+    btn.disabled = false;
+  }).catch(function() {
+    btn.textContent = 'Scan Networks';
+    btn.disabled = false;
+  });
+}
+
+function wifiConnect() {
+  var ssid = document.getElementById('wifi-scan-list').value;
+  var pass = document.getElementById('wifi-pass').value;
+  if (!ssid) return;
+
+  document.getElementById('btn-wifi-connect').textContent = 'Connecting...';
+  document.getElementById('btn-wifi-connect').disabled = true;
+
+  fetch('/api/wifi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ssid: ssid, pass: pass })
+  }).then(function() {
+    document.getElementById('wifi-status').textContent = 'Rebooting... reconnect to new network';
+    document.getElementById('btn-wifi-connect').textContent = 'Rebooting...';
+  }).catch(function() {
+    document.getElementById('btn-wifi-connect').textContent = 'Connect';
+    document.getElementById('btn-wifi-connect').disabled = false;
+  });
+}
+
+// --- Status loading ---
+
 function loadStatus() {
-  fetch('/api/status').then(r => r.json()).then(s => {
-    let txt = '';
+  fetch('/api/status').then(function(r) { return r.json(); }).then(function(s) {
+    var txt = '';
     if (s.sd_free_mb !== undefined) txt += 'SD free: ' + s.sd_free_mb.toFixed(1) + ' MB';
     if (s.rssi !== undefined) txt += ' | RSSI: ' + s.rssi + ' dBm';
+    if (s.wifi_mode) txt += ' | WiFi: ' + s.wifi_mode;
     document.getElementById('sd-status').textContent = txt;
 
     // Update recording state
     if (s.recording !== undefined) {
-      const wasRecording = recording;
+      var wasRecording = recording;
       recording = s.recording;
       document.getElementById('btn-rec').textContent = recording ? 'Stop Recording' : 'Start Recording';
       if (recording) {
-        let src = s.rec_source === 'auto' ? 'auto' : 'manual';
-        let recTxt = 'Recording (' + src + '): ' + (s.filename || '');
+        var src = s.rec_source === 'auto' ? 'auto' : 'manual';
+        var recTxt = 'Recording (' + src + '): ' + (s.filename || '');
         if (s.rec_started_at) recTxt += ' | started ' + s.rec_started_at;
         document.getElementById('rec-status').textContent = recTxt;
       } else {
         document.getElementById('rec-status').textContent = 'Idle';
       }
-      if (wasRecording && !recording) loadFiles();
+      if (wasRecording && !recording) { currentPage = 0; loadFiles(); }
     }
 
     // Update auto-record state
     if (s.auto_mode !== undefined) {
       autoMode = s.auto_mode;
-      const btn = document.getElementById('btn-auto');
+      var btn = document.getElementById('btn-auto');
       btn.textContent = autoMode ? 'Disable Auto-Record' : 'Enable Auto-Record';
       btn.className = autoMode ? 'active' : '';
 
-      let autoTxt;
+      var autoTxt;
       if (!autoMode) {
         autoTxt = 'Disabled';
       } else if (s.recording && s.rec_source === 'auto') {
@@ -339,11 +727,11 @@ function loadStatus() {
 
     // Update RMS bar
     if (s.current_rms !== undefined) {
-      const rmsPct = Math.min(100, (s.current_rms / 10000) * 100);
+      var rmsPct = Math.min(100, (s.current_rms / 10000) * 100);
       document.getElementById('rms-bar').style.width = rmsPct + '%';
     }
 
-    // Update µ-law checkbox
+    // Update u-law checkbox
     if (s.ulaw !== undefined) {
       document.getElementById('chk-ulaw').checked = s.ulaw;
     }
@@ -355,9 +743,9 @@ function loadStatus() {
 
     // Update filter state
     if (s.filter_hp !== undefined || s.filter_lp !== undefined) {
-      const hp = s.filter_hp || 0;
-      const lp = s.filter_lp || 0;
-      const active = hp > 0 || lp > 0;
+      var hp = s.filter_hp || 0;
+      var lp = s.filter_lp || 0;
+      var active = hp > 0 || lp > 0;
       document.getElementById('chk-filter').checked = active;
       document.getElementById('filter-controls').style.display = active ? 'block' : 'none';
       if (hp > 0) {
@@ -373,81 +761,13 @@ function loadStatus() {
         document.getElementById('filter-lp-val').textContent = 'Off';
       }
     }
-  }).catch(() => {});
-}
-
-function playFile(name) {
-  stopPlayback();
-  currentAudio = new Audio('/api/files/' + name);
-  currentPlayingName = name;
-  currentAudio.play();
-  currentAudio.onended = function() { stopPlayback(); };
-  updatePlayButtons();
-}
-
-function stopPlayback() {
-  if (currentAudio) { currentAudio.pause(); currentAudio.src = ''; currentAudio = null; }
-  currentPlayingName = null;
-  updatePlayButtons();
-}
-
-function updatePlayButtons() {
-  document.querySelectorAll('#files li').forEach(function(li) {
-    var name = li.querySelector('.file-name');
-    if (!name) return;
-    var playBtn = li.querySelector('.btn-play');
-    var stopBtn = li.querySelector('.btn-stop');
-    if (playBtn && stopBtn) {
-      var playing = currentPlayingName === name.textContent;
-      playBtn.style.display = playing ? 'none' : '';
-      stopBtn.style.display = playing ? '' : 'none';
-    }
-  });
-}
-
-function showWaveform(name, btn) {
-  var li = btn.closest('li');
-  var existing = li.querySelector('canvas');
-  if (existing) { existing.remove(); return; }
-  var canvas = document.createElement('canvas');
-  canvas.width = li.offsetWidth || 500;
-  canvas.height = 60;
-  canvas.style.cssText = 'width:100%;height:60px;margin-top:4px;border-radius:4px;background:#0a0a1a;';
-  li.appendChild(canvas);
-  fetch('/api/waveform?file=' + encodeURIComponent(name) + '&bins=128')
-    .then(function(r) { return r.json(); })
-    .then(function(peaks) {
-      var ctx = canvas.getContext('2d');
-      var w = canvas.width, h = canvas.height;
-      ctx.clearRect(0, 0, w, h);
-      var max = 0;
-      for (var i = 0; i < peaks.length; i++) { if (peaks[i] > max) max = peaks[i]; }
-      if (max === 0) max = 1;
-      var barW = w / peaks.length;
-      ctx.fillStyle = '#e94560';
-      for (var i = 0; i < peaks.length; i++) {
-        var barH = (peaks[i] / max) * h;
-        ctx.fillRect(i * barW, h - barH, Math.max(barW - 1, 1), barH);
-      }
-    })
-    .catch(function() { canvas.remove(); });
-}
-
-function dlFile(name) {
-  const a = document.createElement('a');
-  a.href = '/api/files/' + name;
-  a.download = name;
-  a.click();
-}
-
-function delFile(name) {
-  if (!confirm('Delete ' + name + '?')) return;
-  fetch('/api/files/' + name, { method: 'DELETE' }).then(() => loadFiles());
+  }).catch(function() {});
 }
 
 // Load on page open
 loadFiles();
 loadStatus();
+loadWifiStatus();
 
 // Auto-refresh status every 3s
 setInterval(loadStatus, 3000);

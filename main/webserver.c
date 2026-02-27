@@ -1,6 +1,8 @@
 #include "webserver.h"
+#include "waveform.h"
 #include "sdcard.h"
 #include "audio.h"
+#include "wifi.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -157,6 +159,7 @@ static esp_err_t api_files_handler(httpd_req_t *req)
                  ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
                  ti.tm_hour, ti.tm_min, ti.tm_sec);
         cJSON_AddStringToObject(obj, "modified", timebuf);
+        cJSON_AddBoolToObject(obj, "has_waveform", waveform_has_cache(ent->d_name));
 
         cJSON_AddItemToArray(arr, obj);
     }
@@ -180,7 +183,7 @@ static esp_err_t api_file_download_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    char path[128];
+    char path[280];
     snprintf(path, sizeof(path), "%s/%s", SD_MOUNT_POINT, filename);
 
     FILE *f = fopen(path, "rb");
@@ -189,8 +192,71 @@ static esp_err_t api_file_download_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    httpd_resp_set_type(req, "audio/wav");
+    fseek(f, 0, SEEK_END);
+    long total_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
 
+    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+
+    // Check for Range header
+    char range_hdr[64] = "";
+    if (httpd_req_get_hdr_value_str(req, "Range", range_hdr, sizeof(range_hdr)) == ESP_OK) {
+        long range_start = 0, range_end = total_size - 1;
+
+        // Parse "bytes=START-END" or "bytes=START-"
+        if (strncmp(range_hdr, "bytes=", 6) == 0) {
+            char *dash = strchr(range_hdr + 6, '-');
+            if (dash) {
+                range_start = strtol(range_hdr + 6, NULL, 10);
+                if (dash[1] != '\0') {
+                    range_end = strtol(dash + 1, NULL, 10);
+                }
+            }
+        }
+
+        // Clamp
+        if (range_start < 0) range_start = 0;
+        if (range_end >= total_size) range_end = total_size - 1;
+        if (range_start > range_end) {
+            fclose(f);
+            httpd_resp_set_status(req, "416 Range Not Satisfiable");
+            httpd_resp_send(req, NULL, 0);
+            return ESP_FAIL;
+        }
+
+        long content_length = range_end - range_start + 1;
+
+        static char cr_buf[80];
+        snprintf(cr_buf, sizeof(cr_buf), "bytes %ld-%ld/%ld", range_start, range_end, total_size);
+        httpd_resp_set_hdr(req, "Content-Range", cr_buf);
+
+        static char cl_buf[24];
+        snprintf(cl_buf, sizeof(cl_buf), "%ld", content_length);
+        httpd_resp_set_hdr(req, "Content-Length", cl_buf);
+
+        httpd_resp_set_status(req, "206 Partial Content");
+
+        fseek(f, range_start, SEEK_SET);
+        char buf[1024];
+        long remaining = content_length;
+        while (remaining > 0) {
+            size_t to_read = (remaining < (long)sizeof(buf)) ? (size_t)remaining : sizeof(buf);
+            size_t n = fread(buf, 1, to_read, f);
+            if (n == 0) break;
+            if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+                fclose(f);
+                httpd_resp_send_chunk(req, NULL, 0);
+                return ESP_FAIL;
+            }
+            remaining -= n;
+        }
+        fclose(f);
+        httpd_resp_send_chunk(req, NULL, 0);
+        return ESP_OK;
+    }
+
+    // No Range header — stream entire file
     char buf[1024];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
@@ -221,6 +287,7 @@ static esp_err_t api_file_delete_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    waveform_delete_cache(filename);
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
@@ -363,18 +430,6 @@ static esp_err_t api_filter_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// µ-law decode table (8-bit µ-law → 16-bit linear PCM)
-static int16_t ulaw_decode(uint8_t u)
-{
-    u = ~u;
-    int sign = (u & 0x80) ? -1 : 1;
-    int exponent = (u >> 4) & 0x07;
-    int mantissa = u & 0x0F;
-    int magnitude = ((mantissa << 3) + 0x84) << exponent;
-    magnitude -= 0x84;
-    return (int16_t)(sign * magnitude);
-}
-
 // Decode %XX sequences in-place
 static void url_decode(char *str)
 {
@@ -402,21 +457,14 @@ static void url_decode(char *str)
 
 static esp_err_t api_waveform_handler(httpd_req_t *req)
 {
-    // Parse query: file=<name>&bins=N
     char qbuf[256];
     char filename[128] = "";
-    int bins = 128;
 
     if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
         char param[128];
         if (httpd_query_key_value(qbuf, "file", param, sizeof(param)) == ESP_OK) {
             url_decode(param);
             strncpy(filename, param, sizeof(filename) - 1);
-        }
-        if (httpd_query_key_value(qbuf, "bins", param, sizeof(param)) == ESP_OK) {
-            bins = atoi(param);
-            if (bins < 1) bins = 1;
-            if (bins > 512) bins = 512;
         }
     }
 
@@ -425,105 +473,25 @@ static esp_err_t api_waveform_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    char path[280];
-    snprintf(path, sizeof(path), "%s/%s", SD_MOUNT_POINT, filename);
-    ESP_LOGI(TAG, "waveform: file='%s' path='%s'", filename, path);
-
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
-        return ESP_FAIL;
-    }
-
-    // Get file size for data_size fallback
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    // Read 44-byte WAV header
-    uint8_t hdr[44];
-    if (file_size < 44 || fread(hdr, 1, 44, f) != 44) {
-        fclose(f);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "File too small for WAV header");
-        return ESP_FAIL;
-    }
-
-    // Validate RIFF/WAVE tags
-    if (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) {
-        fclose(f);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not a WAV file");
-        return ESP_FAIL;
-    }
-
-    uint16_t audio_format = hdr[20] | (hdr[21] << 8);
-    uint16_t bits_per_sample = hdr[34] | (hdr[35] << 8);
-    uint16_t block_align = hdr[32] | (hdr[33] << 8);
-    uint32_t data_size = hdr[40] | (hdr[41] << 8) | (hdr[42] << 16) | (hdr[43] << 24);
-
-    bool is_ulaw = (audio_format == 7 && bits_per_sample == 8);
-    bool is_pcm16 = (audio_format == 1 && bits_per_sample == 16);
-    if (!is_ulaw && !is_pcm16) {
-        fclose(f);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported format");
-        return ESP_FAIL;
-    }
-
-    // If data_size is 0 (e.g. file not properly closed), use file size minus header
-    if (data_size == 0 && file_size > 44) {
-        data_size = (uint32_t)(file_size - 44);
-        ESP_LOGW(TAG, "waveform: data_size=0, using fallback %lu", (unsigned long)data_size);
-    }
-
-    uint32_t total_samples = data_size / block_align;
-    if (bins > (int)total_samples) bins = (int)total_samples;
-    if (bins < 1) bins = 1;
-
-    uint32_t samples_per_bin = total_samples / bins;
-
-    // Allocate peaks array
-    uint16_t *peaks = calloc(bins, sizeof(uint16_t));
-    if (!peaks) {
-        fclose(f);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
-        return ESP_FAIL;
-    }
-
-    uint8_t chunk[512];
-    for (int b = 0; b < bins; b++) {
-        uint32_t offset = 44 + (uint32_t)b * samples_per_bin * block_align;
-        fseek(f, offset, SEEK_SET);
-        uint32_t remaining = samples_per_bin;
-        uint16_t peak = 0;
-
-        while (remaining > 0) {
-            uint32_t to_read = remaining * block_align;
-            if (to_read > sizeof(chunk)) to_read = sizeof(chunk);
-            size_t got = fread(chunk, 1, to_read, f);
-            if (got == 0) break;
-
-            uint32_t n = got / block_align;
-            for (uint32_t i = 0; i < n; i++) {
-                int16_t sample;
-                if (is_ulaw) {
-                    sample = ulaw_decode(chunk[i * block_align]);
-                } else {
-                    sample = (int16_t)(chunk[i * block_align] | (chunk[i * block_align + 1] << 8));
-                }
-                uint16_t abs_val = (sample < 0) ? -sample : sample;
-                if (abs_val > peak) peak = abs_val;
-            }
-            remaining -= n;
+    // Try reading from cache first
+    uint16_t peaks[WAVEFORM_BINS];
+    if (waveform_read_cache(filename, peaks) != ESP_OK) {
+        // Cache miss — generate now (fallback)
+        if (waveform_generate(filename) != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Cannot process file");
+            return ESP_FAIL;
         }
-        peaks[b] = peak;
+        if (waveform_read_cache(filename, peaks) != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cache read failed");
+            return ESP_FAIL;
+        }
     }
-    fclose(f);
 
     // Build JSON array
     cJSON *arr = cJSON_CreateArray();
-    for (int i = 0; i < bins; i++) {
+    for (int i = 0; i < WAVEFORM_BINS; i++) {
         cJSON_AddItemToArray(arr, cJSON_CreateNumber(peaks[i]));
     }
-    free(peaks);
 
     char *json_str = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
@@ -557,10 +525,20 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     uint64_t free_bytes = sdcard_free_bytes();
     cJSON_AddNumberToObject(obj, "sd_free_mb", (double)free_bytes / (1024 * 1024));
 
-    // WiFi RSSI
-    wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        cJSON_AddNumberToObject(obj, "rssi", ap_info.rssi);
+    // WiFi mode and IP
+    wifi_app_mode_t wmode = wifi_get_mode();
+    cJSON_AddStringToObject(obj, "wifi_mode",
+        wmode == WIFI_APP_MODE_STA ? "STA" :
+        wmode == WIFI_APP_MODE_AP  ? "AP"  : "OFFLINE");
+    cJSON_AddStringToObject(obj, "wifi_ssid", wifi_get_ssid());
+    cJSON_AddStringToObject(obj, "wifi_ip", wifi_get_ip());
+
+    // WiFi RSSI (only in STA mode)
+    if (wmode == WIFI_APP_MODE_STA) {
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            cJSON_AddNumberToObject(obj, "rssi", ap_info.rssi);
+        }
     }
 
     // Recording state -- provided by main.c via getters
@@ -609,6 +587,99 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// --- WiFi API handlers ---
+
+static esp_err_t api_wifi_get_handler(httpd_req_t *req)
+{
+    cJSON *obj = cJSON_CreateObject();
+    wifi_app_mode_t m = wifi_get_mode();
+    cJSON_AddStringToObject(obj, "mode",
+        m == WIFI_APP_MODE_STA ? "STA" :
+        m == WIFI_APP_MODE_AP  ? "AP"  : "OFFLINE");
+    cJSON_AddStringToObject(obj, "ssid", wifi_get_ssid());
+    cJSON_AddStringToObject(obj, "ip", wifi_get_ip());
+
+    // Saved networks
+    char ssids[5][33];
+    int cnt = wifi_get_saved_ssids(ssids, 5);
+    cJSON *saved = cJSON_CreateArray();
+    for (int i = 0; i < cnt; i++) {
+        cJSON_AddItemToArray(saved, cJSON_CreateString(ssids[i]));
+    }
+    cJSON_AddItemToObject(obj, "saved", saved);
+
+    char *json_str = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ESP_OK;
+}
+
+static esp_err_t api_wifi_post_handler(httpd_req_t *req)
+{
+    char buf[256];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jssid = cJSON_GetObjectItem(json, "ssid");
+    cJSON *jpass = cJSON_GetObjectItem(json, "pass");
+    if (!jssid || !cJSON_IsString(jssid) || strlen(jssid->valuestring) == 0) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ssid");
+        return ESP_FAIL;
+    }
+
+    const char *ssid = jssid->valuestring;
+    const char *pass = (jpass && cJSON_IsString(jpass)) ? jpass->valuestring : "";
+
+    // Send response before rebooting
+    httpd_resp_sendstr(req, "OK, rebooting...");
+    cJSON_Delete(json);
+
+    // Save and reboot (does not return)
+    wifi_save_and_connect(ssid, pass);
+    return ESP_OK;
+}
+
+static esp_err_t api_wifi_scan_handler(httpd_req_t *req)
+{
+    wifi_ap_record_t *results = calloc(20, sizeof(wifi_ap_record_t));
+    if (!results) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    uint16_t count = wifi_scan(results, 20);
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *ap = cJSON_CreateObject();
+        cJSON_AddStringToObject(ap, "ssid", (const char *)results[i].ssid);
+        cJSON_AddNumberToObject(ap, "rssi", results[i].rssi);
+        cJSON_AddNumberToObject(ap, "auth", results[i].authmode);
+        cJSON_AddItemToArray(arr, ap);
+    }
+    free(results);
+
+    char *json_str = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ESP_OK;
+}
+
 // --- Public API ---
 
 esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
@@ -617,9 +688,10 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
     ws_clients_init();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.close_fn = ws_close_callback;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -698,6 +770,27 @@ esp_err_t webserver_start(webserver_cmd_cb_t cmd_cb)
         .handler = api_waveform_handler,
     };
     httpd_register_uri_handler(s_server, &uri_waveform);
+
+    httpd_uri_t uri_wifi_get = {
+        .uri = "/api/wifi",
+        .method = HTTP_GET,
+        .handler = api_wifi_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_wifi_get);
+
+    httpd_uri_t uri_wifi_post = {
+        .uri = "/api/wifi",
+        .method = HTTP_POST,
+        .handler = api_wifi_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_wifi_post);
+
+    httpd_uri_t uri_wifi_scan = {
+        .uri = "/api/wifi/scan",
+        .method = HTTP_GET,
+        .handler = api_wifi_scan_handler,
+    };
+    httpd_register_uri_handler(s_server, &uri_wifi_scan);
 
     httpd_uri_t uri_index = {
         .uri = "/*",

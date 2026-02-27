@@ -18,6 +18,7 @@
 #include "sdcard.h"
 #include "wav.h"
 #include "webserver.h"
+#include "waveform.h"
 
 static const char *TAG = "main";
 
@@ -357,6 +358,8 @@ static void stop_recording(void)
     s_wav_file = NULL;
     ESP_LOGI(TAG, "Recording stopped (%s): %s",
              s_rec_source == REC_SOURCE_AUTO ? "auto" : "manual", s_rec_filename);
+    // Generate waveform cache for the completed recording
+    waveform_generate(s_rec_filename);
     s_rec_source = REC_SOURCE_NONE;
 }
 
@@ -571,13 +574,17 @@ void app_main(void)
     // Recording mutex
     s_rec_mutex = xSemaphoreCreateMutex();
 
-    // Connect WiFi
+    // Connect WiFi (scans, tries saved creds, falls back to AP)
     ESP_LOGI(TAG, "Starting WiFi...");
-    ESP_ERROR_CHECK(wifi_init_sta());
+    wifi_init();
 
-    // Sync time via SNTP
-    ESP_LOGI(TAG, "Syncing time via SNTP...");
-    init_sntp();
+    // Sync time via SNTP (only in STA mode)
+    if (wifi_get_mode() == WIFI_APP_MODE_STA) {
+        ESP_LOGI(TAG, "Syncing time via SNTP...");
+        init_sntp();
+    } else {
+        ESP_LOGW(TAG, "AP mode — skipping SNTP");
+    }
 
     // Mount SD card
     ESP_LOGI(TAG, "Mounting SD card...");
@@ -593,6 +600,9 @@ void app_main(void)
     // Start web server
     ESP_LOGI(TAG, "Starting web server...");
     ESP_ERROR_CHECK(webserver_start(on_ws_command));
+
+    // Generate missing waveform caches in background
+    waveform_start_bg_task();
 
     // Launch audio pipeline on core 1
     xTaskCreatePinnedToCore(audio_pipeline_task, "audio_pipe", 8192, NULL, 5, NULL, 1);
