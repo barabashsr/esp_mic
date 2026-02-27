@@ -7,8 +7,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 
-#define WIFI_SSID      "Beeline_2G_F13F37"
-#define WIFI_PASS      "1122334455667788"
+#define WIFI_SSID      "Ya_Robot"//"Beeline_2G_F13F37"
+#define WIFI_PASS      "de37945a0"//"1122334455667788"
 #define WIFI_MAX_RETRY 10
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -35,6 +35,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        ESP_LOGI(TAG, "WiFi modem sleep enabled");
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }

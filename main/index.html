@@ -109,6 +109,8 @@ let autoMode = false;
 let nextPlayTime = 0;
 let thresholdTimer = null;
 let filterTimer = null;
+let currentAudio = null;
+let currentPlayingName = null;
 
 function toggleListen() {
   if (!listening) startListen();
@@ -275,11 +277,14 @@ function loadFiles() {
       li.innerHTML =
         '<span class="file-name">' + f.name + '</span>' +
         '<span class="file-info">' + info + '</span>' +
-        '<button class="secondary" onclick="playFile(\'' + f.name + '\')">Play</button>' +
+        '<button class="secondary btn-play" onclick="playFile(\'' + f.name + '\')">Play</button>' +
+        '<button class="secondary btn-stop" onclick="stopPlayback()" style="display:none">Stop</button>' +
+        '<button class="secondary" onclick="showWaveform(\'' + f.name + '\', this)">Wave</button>' +
         '<button class="secondary" onclick="dlFile(\'' + f.name + '\')">DL</button>' +
         '<button class="danger" onclick="delFile(\'' + f.name + '\')">Del</button>';
       ul.appendChild(li);
     });
+    updatePlayButtons();
   }).catch(() => {
     document.getElementById('files').innerHTML = '<li>Error loading files</li>';
   });
@@ -372,8 +377,60 @@ function loadStatus() {
 }
 
 function playFile(name) {
-  const a = new Audio('/api/files/' + name);
-  a.play();
+  stopPlayback();
+  currentAudio = new Audio('/api/files/' + name);
+  currentPlayingName = name;
+  currentAudio.play();
+  currentAudio.onended = function() { stopPlayback(); };
+  updatePlayButtons();
+}
+
+function stopPlayback() {
+  if (currentAudio) { currentAudio.pause(); currentAudio.src = ''; currentAudio = null; }
+  currentPlayingName = null;
+  updatePlayButtons();
+}
+
+function updatePlayButtons() {
+  document.querySelectorAll('#files li').forEach(function(li) {
+    var name = li.querySelector('.file-name');
+    if (!name) return;
+    var playBtn = li.querySelector('.btn-play');
+    var stopBtn = li.querySelector('.btn-stop');
+    if (playBtn && stopBtn) {
+      var playing = currentPlayingName === name.textContent;
+      playBtn.style.display = playing ? 'none' : '';
+      stopBtn.style.display = playing ? '' : 'none';
+    }
+  });
+}
+
+function showWaveform(name, btn) {
+  var li = btn.closest('li');
+  var existing = li.querySelector('canvas');
+  if (existing) { existing.remove(); return; }
+  var canvas = document.createElement('canvas');
+  canvas.width = li.offsetWidth || 500;
+  canvas.height = 60;
+  canvas.style.cssText = 'width:100%;height:60px;margin-top:4px;border-radius:4px;background:#0a0a1a;';
+  li.appendChild(canvas);
+  fetch('/api/waveform?file=' + encodeURIComponent(name) + '&bins=128')
+    .then(function(r) { return r.json(); })
+    .then(function(peaks) {
+      var ctx = canvas.getContext('2d');
+      var w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      var max = 0;
+      for (var i = 0; i < peaks.length; i++) { if (peaks[i] > max) max = peaks[i]; }
+      if (max === 0) max = 1;
+      var barW = w / peaks.length;
+      ctx.fillStyle = '#e94560';
+      for (var i = 0; i < peaks.length; i++) {
+        var barH = (peaks[i] / max) * h;
+        ctx.fillRect(i * barW, h - barH, Math.max(barW - 1, 1), barH);
+      }
+    })
+    .catch(function() { canvas.remove(); });
 }
 
 function dlFile(name) {

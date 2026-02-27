@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_heap_caps.h"
 #include "esp_netif_sntp.h"
 
@@ -205,6 +206,49 @@ static void pre_buf_flush_to_wav(void)
     s_pre_buf_count = 0;
 }
 
+// --- NVS helpers ---
+static void nvs_save_u8(const char *key, uint8_t val)
+{
+    nvs_handle_t h;
+    if (nvs_open("settings", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, key, val);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void nvs_save_u16(const char *key, uint16_t val)
+{
+    nvs_handle_t h;
+    if (nvs_open("settings", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, key, val);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void load_settings_from_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("settings", NVS_READONLY, &h) != ESP_OK) return;
+
+    uint16_t u16;
+    uint8_t u8;
+
+    if (nvs_get_u16(h, "auto_thr", &u16) == ESP_OK) s_auto_threshold = u16;
+    if (nvs_get_u8(h, "auto_mode", &u8) == ESP_OK) s_auto_mode = u8;
+    if (nvs_get_u8(h, "use_ulaw", &u8) == ESP_OK) s_use_ulaw = u8;
+
+    uint16_t hp = 0, lp = 0;
+    nvs_get_u16(h, "filter_hp", &hp);
+    nvs_get_u16(h, "filter_lp", &lp);
+    if (hp || lp) audio_set_filter(hp, lp);
+
+    nvs_close(h);
+    ESP_LOGI(TAG, "NVS: thr=%u auto=%d ulaw=%d hp=%u lp=%u",
+             s_auto_threshold, s_auto_mode, s_use_ulaw, hp, lp);
+}
+
 // --- Getters for webserver ---
 bool main_is_recording(void) { return s_recording; }
 const char *main_rec_filename(void) { return s_rec_filename; }
@@ -213,7 +257,7 @@ uint16_t main_current_rms(void) { return s_current_rms; }
 bool main_auto_mode(void) { return s_auto_mode; }
 uint16_t main_auto_threshold(void) { return s_auto_threshold; }
 bool main_use_ulaw(void) { return s_use_ulaw; }
-void main_set_use_ulaw(bool v) { s_use_ulaw = v; }
+void main_set_use_ulaw(bool v) { s_use_ulaw = v; nvs_save_u8("use_ulaw", v); }
 float main_current_zcr(void) { return s_current_zcr; }
 
 const char *main_rec_source_str(void)
@@ -237,12 +281,14 @@ void main_set_auto_mode(bool enabled)
         s_silence_chunks = 0;
     }
     s_auto_mode = enabled;
+    nvs_save_u8("auto_mode", enabled);
 }
 void main_set_auto_threshold(uint16_t thr)
 {
     if (thr < 100) thr = 100;
     if (thr > 10000) thr = 10000;
     s_auto_threshold = thr;
+    nvs_save_u16("auto_thr", thr);
 }
 
 // --- Flush write buffer to SD (with file splitting) ---
@@ -540,6 +586,9 @@ void app_main(void)
     // Initialize ADC
     ESP_LOGI(TAG, "Initializing audio...");
     ESP_ERROR_CHECK(audio_init());
+
+    // Load persisted settings from NVS
+    load_settings_from_nvs();
 
     // Start web server
     ESP_LOGI(TAG, "Starting web server...");
